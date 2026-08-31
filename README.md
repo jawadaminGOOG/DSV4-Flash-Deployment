@@ -88,7 +88,8 @@ The XLA compiler overlaps inter-chip communication directly with Matrix Multiply
 * **INT8 MoE Weights**: The 256 routed experts occupy **23.65 GB per chip** on 16 chips.
 * **FP8 KV Cache**: FP8 format reduces KV cache memory consumption by 50% compared to BF16.
 * **Memory Limits**: The configuration `--max-model-len 2048`, `--max-num-seqs 512`, and `--gpu-memory-utilization 0.85` reserves **26.68 GB** of static state, leaving roughly **4.56 GB of free HBM headroom** per chip.
-* **Headroom caveat**: That margin is thin. Under the C=512 tier the TPU runtime does hit `RESOURCE_EXHAUSTED` on individual program loads and recovers via `ExecutePrepareWithOomRetries` (defragment and retry). No request failed as a result, but the retries stall the step and contribute to the gap between steady-state decode rate and end-to-end throughput. Lower `--max-num-seqs` or `--gpu-memory-utilization` if you need a larger margin.
+* **Headroom caveat**: That margin is thin, and most of it is spent on one allocation. At startup, sampling pre-compilation builds a dummy logits tensor of shape `(max_num_seqs × dp_size, vocab_size)` in float32 — at `--max-num-seqs 512`, 16-way DP and a 129,280-token vocabulary, that is `(8192, 129280)`, or **3.95 GiB**, materialized as a single contiguous buffer before it is sharded. Roughly 600 MB of headroom remains after it. Under the C=512 tier the TPU runtime consequently hits `RESOURCE_EXHAUSTED` on individual program loads and recovers via `ExecutePrepareWithOomRetries` (defragment and retry). No request failed as a result, but the retries stall the step and contribute to the gap between steady-state decode rate and end-to-end throughput.
+* **`--max-num-seqs 512` is a ceiling, not a preference.** That buffer scales linearly with the flag, so `--max-num-seqs 1024` asks for 7.89 GiB and the engine fails to start with `RuntimeBufferAllocationFailure`. Separately, the KV cache holds `81,427 tokens` per chip — 1,302,832 across the slice, or **636 concurrent sequences at the full 2,048-token context** — so values much above ~640 could not be filled at this context length in any case.
 
 ---
 
@@ -124,6 +125,20 @@ Find all deployment manifests and benchmark scripts in the [`recipes/`](./recipe
    ```
 2. Store DeepSeek-V4-Flash model weights in a Google Cloud Storage bucket (for example, `gs://<YOUR_GCS_BUCKET>/deepseek-v4-flash`).
 3. Prepare a container image that contains JAX/XLA, vLLM, and TPU dependencies.
+4. Grant the pods read access to the bucket through Workload Identity. The manifest creates the
+   Kubernetes service account `dsv4-sa`; bind it to a Google service account that can read the
+   checkpoint:
+   ```bash
+   gcloud storage buckets add-iam-policy-binding gs://<YOUR_GCS_BUCKET> \
+     --member="serviceAccount:<YOUR_GOOGLE_SERVICE_ACCOUNT>" \
+     --role=roles/storage.objectViewer
+
+   gcloud iam service-accounts add-iam-policy-binding <YOUR_GOOGLE_SERVICE_ACCOUNT> \
+     --role=roles/iam.workloadIdentityUser \
+     --member="serviceAccount:<YOUR_PROJECT>.svc.id.goog[default/dsv4-sa]"
+   ```
+   Then replace `<YOUR_GOOGLE_SERVICE_ACCOUNT>` in the `ServiceAccount` annotation in
+   [`recipes/dsv4-flash-v6e16.yaml`](./recipes/dsv4-flash-v6e16.yaml).
 
 ---
 
@@ -148,7 +163,9 @@ Find all deployment manifests and benchmark scripts in the [`recipes/`](./recipe
    > `init engine (profile, create kv cache, warmup model)`, almost all of it XLA compilation,
    > before `Application startup complete`. Size any liveness or readiness probe accordingly.
    > `JAX_COMPILATION_CACHE_DIR` is set to `/jaxcache` so subsequent starts on the same node reuse
-   > the compiled artifacts.
+   > the compiled artifacts: with that cache warm the same step takes about **6.5 minutes**
+   > (`init engine ... took 390.13 s (compilation: 372.57 s)`). The cache lives on a `hostPath`, so
+   > it survives pod restarts but not node replacement.
 
 4. Verify server readiness:
    ```bash

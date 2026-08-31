@@ -22,6 +22,21 @@ spec:
       port: 8000
       targetPort: 8000
 ---
+# The Job's pods run as this account. It must exist before the Job is created:
+# the job controller rejects every pod with FailedCreate if it is missing, and
+# the Job still reports STATUS Running with zero pods, so the failure is only
+# visible in `kubectl describe job`.
+#
+# Reading the checkpoint from GCS requires Workload Identity. Replace the
+# annotation with a Google service account that holds roles/storage.objectViewer
+# on the bucket, and bind it as described in README section 6.1.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: dsv4-sa
+  annotations:
+    iam.gke.io/gcp-service-account: <YOUR_GOOGLE_SERVICE_ACCOUNT>
+---
 apiVersion: batch/v1
 kind: Job
 metadata:
