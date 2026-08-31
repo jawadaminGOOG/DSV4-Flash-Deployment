@@ -1,0 +1,175 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: dsv4-v6e16
+  labels:
+    app: dsv4-v6e16
+spec:
+  clusterIP: None
+  selector:
+    app: dsv4-v6e16
+  ports:
+    - name: ray-client
+      port: 10001
+      targetPort: 10001
+    - name: ray-dashboard
+      port: 8265
+      targetPort: 8265
+    - name: gcs
+      port: 6379
+      targetPort: 6379
+    - name: vllm
+      port: 8000
+      targetPort: 8000
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: dsv4-v6e16
+spec:
+  parallelism: 4
+  completions: 4
+  completionMode: Indexed
+  backoffLimit: 0
+  template:
+    metadata:
+      labels:
+        app: dsv4-v6e16
+    spec:
+      subdomain: dsv4-v6e16
+      restartPolicy: Never
+      serviceAccountName: dsv4-sa
+      nodeSelector:
+        cloud.google.com/gke-tpu-accelerator: tpu-v6e-slice
+        cloud.google.com/gke-tpu-topology: 4x4
+      dnsPolicy: ClusterFirst
+      volumes:
+        - name: dshm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 16Gi
+        - name: jaxcache
+          hostPath:
+            path: /var/tmp/dsv4-jax-cache
+            type: DirectoryOrCreate
+      containers:
+        - name: worker
+          # Use your organization's tpu-inference image with INT8 MoE and JAX/XLA support
+          image: <YOUR_CONTAINER_REGISTRY>/tpu-inference:latest
+          imagePullPolicy: IfNotPresent
+          resources:
+            limits:
+              google.com/tpu: "4"
+            requests:
+              google.com/tpu: "4"
+              memory: 200Gi
+          volumeMounts:
+            - name: dshm
+              mountPath: /dev/shm
+            - name: jaxcache
+              mountPath: /jaxcache
+          ports:
+            - containerPort: 6379
+            - containerPort: 8000
+          env:
+            - name: TPU_MULTIHOST_BACKEND
+              value: ray
+            - name: JAX_PLATFORMS
+              value: ""
+            - name: RAY_EXPERIMENTAL_NOSET_TPU_VISIBLE_CHIPS
+              value: "1"
+            - name: TPU_SKIP_MDS_QUERY
+              value: "1"
+            - name: JAX_COMPILATION_CACHE_DIR
+              value: /jaxcache
+            - name: TPU_BACKEND_TYPE
+              value: jax
+            # Overlap all-gather and reduce-scatter collective communications with matmuls
+            - name: LIBTPU_INIT_ARGS
+              value: "--xla_tpu_all_gather_collective_matmul_mode=post_spmd --xla_tpu_reduce_scatter_collective_matmul_mode=post_spmd"
+            - name: VLLM_DISABLE_SHARED_EXPERTS_STREAM
+              value: "1"
+            - name: MODEL_IMPL_TYPE
+              value: vllm
+            - name: DRAFT_MODEL_IMPL_TYPE
+              value: vllm
+            - name: NEW_MODEL_DESIGN
+              value: "1"
+            - name: VLLM_MLA_DISABLE
+              value: "0"
+            - name: MOE_REQUANTIZE_BLOCK_SIZE
+              value: "512"
+            - name: MOE_REQUANTIZE_WEIGHT_DTYPE
+              value: int8
+            - name: REQUANTIZE_WEIGHT_DTYPE
+              value: int8
+            - name: HEAD_HOST
+              value: dsv4-v6e16-0.dsv4-v6e16
+            - name: MODEL_URI
+              value: gs://<YOUR_GCS_BUCKET>/deepseek-v4-flash
+            - name: TPU_WORKER_HOSTNAMES
+              value: dsv4-v6e16-0.dsv4-v6e16,dsv4-v6e16-1.dsv4-v6e16,dsv4-v6e16-2.dsv4-v6e16,dsv4-v6e16-3.dsv4-v6e16
+            - name: TPU_WORKER_ID
+              valueFrom:
+                fieldRef:
+                  apiVersion: v1
+                  fieldPath: metadata.annotations['batch.kubernetes.io/job-completion-index']
+            - name: JOB_COMPLETION_INDEX
+              valueFrom:
+                fieldRef:
+                  apiVersion: v1
+                  fieldPath: metadata.labels['batch.kubernetes.io/job-completion-index']
+          command:
+            - /bin/bash
+            - -lc
+          args:
+            - |
+              set -euo pipefail
+              IDX="${JOB_COMPLETION_INDEX:?}"
+              echo "[$(date -Is)] index=${IDX} head=${HEAD_HOST}"
+
+              echo "Checking metadata server connectivity..."
+              for i in $(seq 1 30); do
+                if curl -s -f -m 5 -H "Metadata-Flavor: Google" "http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token" >/dev/null 2>&1; then
+                  echo "Metadata service ready."
+                  break
+                fi
+                echo "Waiting for metadata service ($i/30)..."
+                sleep 2
+              done
+
+              if [ "${IDX}" = "0" ]; then
+                ray start --head --port=6379 --dashboard-host=0.0.0.0
+                
+                echo "Waiting for all 4 nodes (16 TPUs) to join Ray cluster..."
+                for i in $(seq 1 90); do
+                  tpu_ok=$(ray status 2>/dev/null | grep -E "16.0 TPU|16/16 TPU" || true)
+                  if [ -n "${tpu_ok}" ]; then
+                    echo "All 16 TPUs active in Ray cluster: ${tpu_ok}"
+                    break
+                  fi
+                  echo "Waiting for cluster join ($i/90)... current: $(ray status 2>/dev/null | grep TPU || true)"
+                  sleep 5
+                done
+                ray status || true
+
+                exec vllm serve "${MODEL_URI}" \
+                  --served-model-name deepseek-ai/DeepSeek-V4-Flash \
+                  --load-format=runai_streamer \
+                  --trust-remote-code \
+                  --kv-cache-dtype=fp8 \
+                  --tensor-parallel-size 16 \
+                  --enable-expert-parallel \
+                  --additional_config '{"sharding": {"sharding_strategy": {"enable_dp_attention": true}}}' \
+                  --gpu-memory-utilization 0.85 \
+                  --no-enable-prefix-caching \
+                  --max-model-len 2048 \
+                  --max-num-batched-tokens 2048 \
+                  --max-num-seqs 512 \
+                  --host 0.0.0.0 --port 8000
+              else
+                until getent hosts "${HEAD_HOST}" >/dev/null 2>&1; do
+                  echo "waiting for head DNS"; sleep 5
+                done
+                exec ray start --block --address="${HEAD_HOST}:6379"
+              fi
