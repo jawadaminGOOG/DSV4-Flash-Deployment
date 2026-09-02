@@ -71,9 +71,18 @@ byte-identical to the unpatched build.
   fp32. At 512 that is a **3.95 GiB** transient allocation on one chip.
 - `--max-num-batched-tokens` sizes the compile ladder. **2048 is the largest value that compiles on
   this slice.** This is what limits the prefill-heavy shape.
-- `max_num_seqs × max_model_len` **must stay at or below 4,194,304.** The block table is prefetched
-  into a 1 MiB SMEM at 4 bytes per 16-token block, so `512 × (9216 / 16) × 4 = 1,179,648` bytes
-  fails to start. This is why the 9,216-token arm drops to `--max-num-seqs 256`.
+- The **block table is prefetched into a 1 MiB SMEM** at 4 bytes per 16-token block, and it shares
+  that 1 MiB with about 0.11 KiB of scheduler arrays per sequence. `max_num_seqs 512` at 9,216
+  context needs 1,179,648 bytes for the table alone and fails to start. Measured on this slice:
+
+  | `--max-num-seqs` at 9,216 context | block table | scheduler arrays | total of 1.00M | result |
+  |---:|---:|---:|---:|---|
+  | 256 | 576.0K | 27.1K | 603.1K | serves |
+  | 384 | 864.0K | 42.3K | 906.3K | serves |
+  | 432 | 972.0K | 56.5K | 1028.6K | fails by 4.6K |
+
+  The practical ceiling at 9,216 context is near `--max-num-seqs 416`. This recipe uses 256, which
+  is the value the whole sweep was measured on.
 
 ## Benchmark results (concurrency sweep 1 → 512)
 
@@ -95,9 +104,10 @@ are in [`results/benchmark_sweep_report.md`](results/benchmark_sweep_report.md).
 context, so the `1k/1k` rows come from the 2048/512 arm and the two 8k rows come from the 9216/256
 arm. Do not read the three rows as one system state.
 
-**Read the `1k/8k` C=512 row as a lower bound.** On the 9216/256 arm the 256-sequence cap can bind
-before the KV pool does, because a reasoning request occupies only its 1,024-token prompt at
-admission.
+**The reasoning shape is limited by the KV pool, not by the sequence cap.** A `1k/8k` request holds
+only its 1,024-token prompt at admission, so the scheduler admits far more than 256 of them, and
+each one then grows. The pool holds about 313 sequences at the full 9,216-token length. Raising the
+cap to 384 measured 7,992.80 tok/s at C=512, inside the reproducibility band of the 8,067.90 above.
 
 ## Files
 

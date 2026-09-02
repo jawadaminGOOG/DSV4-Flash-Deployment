@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Builds RESULTS.md and the three PNG charts from the sweep JSON files.
+"""Builds benchmark_sweep_report.md and the three PNG charts from the sweep JSON files.
 
 Reads one JSON per shape, as written by `benchmark_sweep.py`, and emits the report in
 the format of the sglang-rtx-pro-6000 DeepSeek-V4-Flash README: a six-column
@@ -52,9 +52,12 @@ REFERENCE = {
              "ttft_s": 1.55, "tpot_ms": 107.64},
 }
 
-# From the record. The KV pool holds 81,427 tokens per chip across 16 chips,
-# so the context length decides how many sequences can be resident at once.
-KV_TOKENS_TOTAL = 1302832
+# The server prints `GPU KV cache size` per DP rank, not per slice. With 16-way
+# DP attention the slice total is 16 times that figure, and it differs between
+# the two arms because the context length changes the block layout.
+#   2048 context:  81,427 tokens per rank -> 1,302,832 across the slice
+#   9216 context: 180,744 tokens per rank -> 2,891,904 across the slice
+KV_TOKENS_BY_SHAPE = {"1k1k": 1302832, "8k1k": 2891904, "1k8k": 2891904}
 
 
 def load(logs_dir, key):
@@ -262,19 +265,21 @@ def main():
         "stay at or below 4,194,304 on this stack, because the block table is "
         "prefetched into a 1 MiB SMEM. The `1k/1k` rows therefore come from "
         "`max_model_len 2048, max_num_seqs 512`, and the two 8k shapes come "
-        "from `max_model_len 9216, max_num_seqs 256`. The lower sequence "
-        "ceiling costs nothing at a 9216-token context, because the KV pool "
-        "holds only 141 sequences there. **The three shapes are not all "
-        "measured on one configuration**, and a reader must not treat the "
-        "three rows as one system state.",
+        "from `max_model_len 9216, max_num_seqs 256`. **The three shapes are "
+        "not all measured on one configuration**, and a reader must not treat "
+        "the three rows as one system state.",
         "",
-        "**The `1k/8k` point at C=512 has two possible limits, and this run "
-        "cannot separate them.** Arm A caps the scheduler at 256 sequences. A "
-        "reasoning request occupies only its 1024-token prompt at admission, "
-        "so the KV pool would hold about 1272 of them at that moment, and the "
-        "256 cap binds before the pool does. The measured curve is flat from "
-        "C=256 to C=512, and either the cap or the growing KV footprint can "
-        "explain that. **Read the `1k/8k` C=512 row as a lower bound.**",
+        "**The reasoning shape is limited by the KV pool, not by the sequence "
+        "cap.** A `1k/8k` request occupies only its 1024-token prompt at "
+        "admission, so the scheduler admits far more than 256 of them, and "
+        "each one then grows. The pool holds about 313 sequences at the full "
+        "9216-token length. A separate run raised the cap to 384 and measured "
+        "7992.80 tok/s at C=512, which is 0.93% below the figure in the "
+        "table below and "
+        "inside the reproducibility band, so the cap is not the constraint. "
+        "The throughput and the mean time per output token imply 323.7 "
+        "concurrent streams at C=512, which agrees with the 313 the pool "
+        "predicts.",
         "",
         "**8k prompts arrive as four prefill chunks.** "
         "`--max-num-batched-tokens` stays at 2048, because a higher value "
@@ -313,7 +318,8 @@ def main():
         # step. The pool therefore holds many more of a long-output request at
         # the start than at the end, which is why the reasoning shape keeps
         # scaling where the prefill-heavy shape does not.
-        start, end = KV_TOKENS_TOTAL // isl, KV_TOKENS_TOTAL // (isl + osl)
+        kv_total = KV_TOKENS_BY_SHAPE[key]
+        start, end = kv_total // isl, kv_total // (isl + osl)
         occupancy = (
             f"so it holds **{end} of them at once**"
             if start // 2 <= end else
@@ -323,7 +329,7 @@ def main():
             f"Measured ISL {any_row['isl_min']} to {isl} tokens, OSL {osl}, "
             f"`ignore_eos`, temperature 0. A request reaches {isl + osl} "
             f"tokens at completion. The KV pool holds "
-            f"{KV_TOKENS_TOTAL:,} tokens across the slice, {occupancy}; "
+            f"{kv_total:,} tokens across the slice, {occupancy}; "
             f"concurrency above that queues at the server.",
             "",
             full_table(rows, any_row["osl"]),
@@ -339,7 +345,7 @@ def main():
         "",
     ]
 
-    out = os.path.join(out_dir, "RESULTS.md")
+    out = os.path.join(out_dir, "benchmark_sweep_report.md")
     open(out, "w").write("\n".join(parts))
     print(f"wrote {out}")
 

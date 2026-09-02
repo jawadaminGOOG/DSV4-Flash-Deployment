@@ -13,9 +13,9 @@ Three workload patterns, run with a streaming client against a live vLLM endpoin
 | Flags | `--gpu-memory-utilization 0.85 --no-enable-prefix-caching --max-num-batched-tokens 2048` |
 | Client | streaming `/v1/completions`, `ignore_eos`, temperature 0, run inside the serving pod |
 
-**Two serving arms, not one.** `max_num_seqs × max_model_len` must stay at or below 4,194,304 on this stack, because the block table is prefetched into a 1 MiB SMEM. The `1k/1k` rows therefore come from `max_model_len 2048, max_num_seqs 512`, and the two 8k shapes come from `max_model_len 9216, max_num_seqs 256`. The lower sequence ceiling costs nothing at a 9216-token context, because the KV pool holds only 141 sequences there. **The three shapes are not all measured on one configuration**, and a reader must not treat the three rows as one system state.
+**Two serving arms, not one.** `max_num_seqs × max_model_len` must stay at or below 4,194,304 on this stack, because the block table is prefetched into a 1 MiB SMEM. The `1k/1k` rows therefore come from `max_model_len 2048, max_num_seqs 512`, and the two 8k shapes come from `max_model_len 9216, max_num_seqs 256`. **The three shapes are not all measured on one configuration**, and a reader must not treat the three rows as one system state.
 
-**The `1k/8k` point at C=512 has two possible limits, and this run cannot separate them.** Arm A caps the scheduler at 256 sequences. A reasoning request occupies only its 1024-token prompt at admission, so the KV pool would hold about 1272 of them at that moment, and the 256 cap binds before the pool does. The measured curve is flat from C=256 to C=512, and either the cap or the growing KV footprint can explain that. **Read the `1k/8k` C=512 row as a lower bound.**
+**The reasoning shape is limited by the KV pool, not by the sequence cap.** A `1k/8k` request occupies only its 1024-token prompt at admission, so the scheduler admits far more than 256 of them, and each one then grows. The pool holds about 313 sequences at the full 9216-token length. A separate run raised the cap to 384 and measured 7992.80 tok/s at C=512, which is 0.93% below the figure in the table below and inside the reproducibility band, so the cap is not the constraint. The throughput and the mean time per output token imply 323.7 concurrent streams at C=512, which agrees with the 313 the pool predicts.
 
 **8k prompts arrive as four prefill chunks.** `--max-num-batched-tokens` stays at 2048, because a higher value fails to compile on this slice. An 8192-token prompt therefore takes four chunked prefill steps. This is a property of the measurement, and it is the main cause of the `8k/1k` result below.
 
@@ -58,7 +58,7 @@ Measured ISL 1019 to 1024 tokens, OSL 1024, `ignore_eos`, temperature 0. A reque
 
 ## 8k/1k (prefill-heavy)
 
-Measured ISL 8189 to 8191 tokens, OSL 1024, `ignore_eos`, temperature 0. A request reaches 9215 tokens at completion. The KV pool holds 1,302,832 tokens across the slice, so it holds **141 of them at once**; concurrency above that queues at the server.
+Measured ISL 8189 to 8191 tokens, OSL 1024, `ignore_eos`, temperature 0. A request reaches 9215 tokens at completion. The KV pool holds 2,891,904 tokens across the slice, so it holds **313 of them at once**; concurrency above that queues at the server.
 
 | Concurrency | Requests | Output tok/s | tok/s per chip | Req/s | TTFT mean (ms) | TTFT p90 (ms) | TPOT mean (ms) | Success | Wall (s) |
 |---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
@@ -75,7 +75,7 @@ Measured ISL 8189 to 8191 tokens, OSL 1024, `ignore_eos`, temperature 0. A reque
 
 ## 1k/8k (reasoning)
 
-Measured ISL 1019 to 1024 tokens, OSL 8192, `ignore_eos`, temperature 0. A request reaches 9216 tokens at completion. The KV pool holds 1,302,832 tokens across the slice, so it holds **1272 of them at admission and only 141 once they are complete**; concurrency above that queues at the server.
+Measured ISL 1019 to 1024 tokens, OSL 8192, `ignore_eos`, temperature 0. A request reaches 9216 tokens at completion. The KV pool holds 2,891,904 tokens across the slice, so it holds **2824 of them at admission and only 313 once they are complete**; concurrency above that queues at the server.
 
 | Concurrency | Requests | Output tok/s | tok/s per chip | Req/s | TTFT mean (ms) | TTFT p90 (ms) | TPOT mean (ms) | Success | Wall (s) |
 |---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
