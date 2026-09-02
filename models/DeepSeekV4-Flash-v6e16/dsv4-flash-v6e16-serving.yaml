@@ -1,0 +1,713 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: dsv4-hoist-patch
+data:
+  hoist-metadata.patch: |
+    diff -urN src-baseline/tpu_inference/kernels/experimental/deepseek_v4/compress_and_store/compressor_v1.py src-fix/tpu_inference/kernels/experimental/deepseek_v4/compress_and_store/compressor_v1.py
+    --- a/tpu_inference/kernels/experimental/deepseek_v4/compress_and_store/compressor_v1.py	2026-09-01 01:10:46.291947505 +0000
+    +++ b/tpu_inference/kernels/experimental/deepseek_v4/compress_and_store/compressor_v1.py	2026-09-01 20:27:08.881344206 +0000
+    @@ -33,24 +33,27 @@
+         block_table: jax.Array,
+         query_start_loc: jax.Array,
+         kv_block_table: jax.Array,
+    -    cache: jax.Array,
+    +    physical_page_size: int,
+    +    state_physical_page_size: int,
+    +    rope_head_dim: int,
+         compress_ratio: int,
+         state_block_size: int,
+         head_dim: int,
+         overlap: bool,
+    -    cos_sin_cache: jax.Array | None,
+    -    state_cache: jax.Array | None = None,
+     ) -> tuple[jax.Array, jax.Array, jax.Array]:
+         """Derives token_to_req_indices, slot_mapping_slots, and kv_slot_mapping.
+     
+       The page geometry is taken from ``config.Configs`` keyed on
+    -  ``cache.shape[1]`` (compressed KV) and ``state_cache.shape[1]`` (state),
+    -  which is the same derivation ``compress_norm_rope_store`` and
+    +  ``physical_page_size`` (compressed KV) and ``state_physical_page_size``
+    +  (state), which is the same derivation ``compress_norm_rope_store`` and
+       ``proj_and_save_state`` use. It must not be recomputed from a separate model
+       here: the three only agree for CSA, and diverge by 2x (HCA) and 4x (indexer)
+       otherwise, which silently scatters state and compressed-KV writes across the
+       wrong pages.
+     
+    +  The caches themselves are not arguments. Only their second dimension reaches
+    +  this derivation, and that dimension is unsharded, so a plain int carries it.
+    +
+       Args:
+         positions: [num_tokens]. Logical position of each token in its request.
+         block_table: [num_reqs * max_blocks]. Flattened row-major page table for the
+    @@ -58,16 +61,15 @@
+         query_start_loc: [num_reqs + 1]. Cumulative sum of query lengths.
+         kv_block_table: [num_reqs * max_kv_blocks]. Flattened row-major page table
+           for the compressed KV cache.
+    -    cache: [num_pages, physical_page_size, 4, lanes] uint8. The compressed-KV
+    -      buffer; only its shape is read here.
+    +    physical_page_size: ``cache.shape[1]`` of the compressed-KV buffer.
+    +    state_physical_page_size: ``shape[1]`` of the state buffer, which is the
+    +      compressed-KV buffer itself when the two share storage.
+    +    rope_head_dim: ``cos_sin_cache.shape[1]``, or 0 when there is no RoPE cache.
+         compress_ratio: Compression ratio (e.g. 4 for CSA, 128 for HCA).
+         state_block_size: Block size vLLM used to build ``block_table``. Must match
+    -      the geometry of ``state_cache``; asserted below.
+    +      the geometry of the state cache; asserted below.
+         head_dim: Dimensionality of attention heads.
+         overlap: Whether to use overlap (CSA path).
+    -    cos_sin_cache: [max_pos, rope_head_dim] or None. RoPE cos/sin cache.
+    -    state_cache: [num_pages, state_page_size, 4, lanes] uint8, or None when the
+    -      state shares ``cache``'s buffer. Only its shape is read here.
+       Returns:
+         token_to_req_indices: [num_tokens]. Request index for each token.
+         slot_mapping_slots: [num_tokens]. Physical row index in the state cache.
+    @@ -75,14 +77,12 @@
+           (``// tokens_in_second_minor`` gives the physical row).
+       """
+         num_tokens = positions.shape[0]
+    -    rope_head_dim = cos_sin_cache.shape[1] if cos_sin_cache is not None else 0
+    -    state_source = cache if state_cache is None else state_cache
+     
+         cfgs = config.Configs.make(
+             config.select_mode(head_dim, overlap),
+             size_n=num_tokens,
+    -        physical_page_size=cache.shape[1],
+    -        state_physical_page_size=state_source.shape[1],
+    +        physical_page_size=physical_page_size,
+    +        state_physical_page_size=state_physical_page_size,
+             head_dim=head_dim,
+             rope_head_dim=rope_head_dim,
+             compress_ratio=compress_ratio,
+    @@ -98,8 +98,9 @@
+         # be the number of token states that actually fit in one physical page.
+         assert state_block_size == cfgs.state_block_size, (
+             f"state cache block_size {state_block_size} does not match the "
+    -        f"{cfgs.dims.mode.value} state cache geometry {state_source.shape}, "
+    -        f"which holds {cfgs.state_block_size} token states per page ")
+    +        f"{cfgs.dims.mode.value} state cache geometry, page size "
+    +        f"{state_physical_page_size}, which holds {cfgs.state_block_size} "
+    +        f"token states per page ")
+     
+         # 2. Map tokens to request indices (Handles Ragged Batch)
+         query_lens = jnp.diff(query_start_loc)
+    @@ -213,6 +214,86 @@
+         )
+     
+     
+    +def compressor_metadata(
+    +    positions: jax.Array,
+    +    block_table: jax.Array,
+    +    query_start_loc: jax.Array,
+    +    kv_block_table: jax.Array,
+    +    distribution: jax.Array,
+    +    physical_page_size: int,
+    +    state_physical_page_size: int,
+    +    rope_head_dim: int,
+    +    compress_ratio: int,
+    +    state_block_size: int,
+    +    head_dim: int,
+    +    overlap: bool,
+    +) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array]:
+    +    """Builds every scatter index the compressor needs, for one cache group.
+    +
+    +  The result is a function of the batch layout and the page geometry only. It
+    +  reads no cache, no weight, and no hidden state, so every layer that shares a
+    +  KV-cache group and a page geometry derives the identical answer. Compute it
+    +  once and pass it to ``compressor_forward`` as ``metadata``. A layer that gets
+    +  ``metadata=None`` recomputes it, which is correct but wasteful.
+    +
+    +  Args:
+    +    positions: [num_tokens]. Logical position of each token in its request.
+    +    block_table: [num_reqs * max_blocks]. State-cache page table.
+    +    query_start_loc: [num_reqs + 1]. Cumulative sum of query lengths.
+    +    kv_block_table: [num_reqs * max_kv_blocks]. Compressed-KV page table.
+    +    distribution: i32[3]. Request-class boundaries; ``[0]`` ends the decode
+    +      requests and ``[2]`` ends the real (non-padding) requests.
+    +    physical_page_size: ``cache.shape[1]``.
+    +    state_physical_page_size: ``shape[1]`` of the state buffer.
+    +    rope_head_dim: ``cos_sin_cache.shape[1]``, or 0 when there is none.
+    +    compress_ratio: Compression ratio (e.g. 4 for CSA, 128 for HCA).
+    +    state_block_size: Block size vLLM used to build ``block_table``.
+    +    head_dim: Dimensionality of attention heads.
+    +    overlap: Whether to use overlap (CSA path).
+    +  Returns:
+    +    slot_mapping_slots: [num_tokens]. State-cache row per token, -1 for
+    +      padding.
+    +    boundary_positions, boundary_req, boundary_kv_slot: the packed boundary
+    +      batch, exactly as ``prepare_boundary_batch`` returns it.
+    +  """
+    +    num_tokens = positions.shape[0]
+    +    num_reqs = query_start_loc.shape[0] - 1
+    +
+    +    token_to_req_indices, slot_mapping_slots, kv_slot_mapping = derive_metadata(
+    +        positions=positions,
+    +        block_table=block_table,
+    +        query_start_loc=query_start_loc,
+    +        kv_block_table=kv_block_table,
+    +        physical_page_size=physical_page_size,
+    +        state_physical_page_size=state_physical_page_size,
+    +        rope_head_dim=rope_head_dim,
+    +        compress_ratio=compress_ratio,
+    +        state_block_size=state_block_size,
+    +        head_dim=head_dim,
+    +        overlap=overlap,
+    +    )
+    +
+    +    token_index = jnp.arange(num_tokens)
+    +    is_real_token = token_index < query_start_loc[distribution[2]]
+    +    slot_mapping_slots = jnp.where(is_real_token, slot_mapping_slots, -1)
+    +
+    +    is_decode_token = token_index < query_start_loc[distribution[0]]
+    +    is_boundary = (kv_slot_mapping >= 0) & is_real_token
+    +
+    +    boundary_positions, boundary_req, boundary_kv_slot = prepare_boundary_batch(
+    +        positions=positions,
+    +        token_to_req_indices=token_to_req_indices,
+    +        kv_slot_mapping=kv_slot_mapping,
+    +        is_boundary=is_boundary,
+    +        is_decode_token=is_decode_token,
+    +        compress_ratio=compress_ratio,
+    +        num_reqs=num_reqs,
+    +    )
+    +
+    +    return (slot_mapping_slots, boundary_positions, boundary_req,
+    +            boundary_kv_slot)
+    +
+    +
+     def compressor_forward(
+         hidden_states: jax.Array,  # [num_tokens, hidden_size] fp32
+         wkv_wgate: jax.Array,  # [2*coff*head_dim, hidden_size] fp32
+    @@ -234,30 +315,38 @@
+         quant_block: int,
+         state_cache: jax.Array
+         | None = None,  # [num_pages, state_page_size, 4, 128] uint8
+    +    metadata: tuple[jax.Array, jax.Array, jax.Array, jax.Array] | None = None,
+     ) -> tuple[jax.Array, jax.Array, jax.Array]:
+         """Projects, saves state, then compresses and stores the boundary records.
+    +
+    +    ``metadata`` is the output of ``compressor_metadata`` for this layer's
+    +    KV-cache group. It is layer-invariant, so the caller should build it once
+    +    and hand the same value to every layer in the group. When it is None this
+    +    function derives it, which gives the same answer at the cost of repeating
+    +    the work once per layer.
+         """
+    -    num_tokens = positions.shape[0]
+         num_reqs = query_start_loc.shape[0] - 1
+         shares_buffer = state_cache is None
+     
+    -    token_to_req_indices, slot_mapping_slots, kv_slot_mapping = derive_metadata(
+    -        positions=positions,
+    -        block_table=block_table,
+    -        query_start_loc=query_start_loc,
+    -        kv_block_table=kv_block_table,
+    -        cache=cache,
+    -        compress_ratio=compress_ratio,
+    -        state_block_size=state_block_size,
+    -        head_dim=head_dim,
+    -        overlap=overlap,
+    -        cos_sin_cache=cos_sin_cache,
+    -        state_cache=state_cache,
+    -    )
+    -
+    -    token_index = jnp.arange(num_tokens)
+    -    is_real_token = token_index < query_start_loc[distribution[2]]
+    -    slot_mapping_slots = jnp.where(is_real_token, slot_mapping_slots, -1)
+    +    if metadata is None:
+    +        state_source = cache if shares_buffer else state_cache
+    +        metadata = compressor_metadata(
+    +            positions=positions,
+    +            block_table=block_table,
+    +            query_start_loc=query_start_loc,
+    +            kv_block_table=kv_block_table,
+    +            distribution=distribution,
+    +            physical_page_size=cache.shape[1],
+    +            state_physical_page_size=state_source.shape[1],
+    +            rope_head_dim=(cos_sin_cache.shape[1]
+    +                           if cos_sin_cache is not None else 0),
+    +            compress_ratio=compress_ratio,
+    +            state_block_size=state_block_size,
+    +            head_dim=head_dim,
+    +            overlap=overlap,
+    +        )
+    +    (slot_mapping_slots, boundary_positions, boundary_req,
+    +     boundary_kv_slot) = metadata
+     
+         updated_state = proj_kernel.proj_and_save_state(
+             hidden_states=hidden_states,
+    @@ -273,19 +362,6 @@
+         else:
+             state_cache = updated_state
+     
+    -    is_decode_token = token_index < query_start_loc[distribution[0]]
+    -    is_boundary = (kv_slot_mapping >= 0) & is_real_token
+    -
+    -    boundary_positions, boundary_req, boundary_kv_slot = prepare_boundary_batch(
+    -        positions=positions,
+    -        token_to_req_indices=token_to_req_indices,
+    -        kv_slot_mapping=kv_slot_mapping,
+    -        is_boundary=is_boundary,
+    -        is_decode_token=is_decode_token,
+    -        compress_ratio=compress_ratio,
+    -        num_reqs=num_reqs,
+    -    )
+    -
+         cache, rope_cache = compress_kernel.compress_norm_rope_store(
+             cache,
+             boundary_positions,
+    diff -urN src-baseline/tpu_inference/layers/vllm/custom_ops/experimental/deepseek_v4/deepseek_v4_compressor.py src-fix/tpu_inference/layers/vllm/custom_ops/experimental/deepseek_v4/deepseek_v4_compressor.py
+    --- a/tpu_inference/layers/vllm/custom_ops/experimental/deepseek_v4/deepseek_v4_compressor.py	2026-09-01 01:10:48.424940768 +0000
+    +++ b/tpu_inference/layers/vllm/custom_ops/experimental/deepseek_v4/deepseek_v4_compressor.py	2026-09-01 20:27:24.646029888 +0000
+    @@ -14,6 +14,8 @@
+     # limitations under the License.
+     """TPU-compatible DeepSeek-V4 KV/score compressor."""
+     
+    +import weakref
+    +
+     import jax
+     import torch
+     from jax.sharding import PartitionSpec as P
+    @@ -27,8 +29,8 @@
+     
+     from tpu_inference.kernels.experimental.deepseek_v4.compress_and_store import \
+         config as compressor_config
+    -from tpu_inference.kernels.experimental.deepseek_v4.compress_and_store.compressor_v1 import \
+    -    compressor_forward
+    +from tpu_inference.kernels.experimental.deepseek_v4.compress_and_store.compressor_v1 import (
+    +    compressor_forward, compressor_metadata)
+     from tpu_inference.layers.common.sharding import ShardingAxisName
+     from tpu_inference.logger import init_logger
+     from tpu_inference.models.vllm.vllm_model_wrapper_context import \
+    @@ -36,6 +38,93 @@
+     
+     logger = init_logger(__name__)
+     
+    +# The compressor's scatter indices are a function of the batch layout and the
+    +# page geometry only, so every layer that shares a KV-cache group derives the
+    +# identical answer. Each layer runs its own `shard_map`, and XLA does not share
+    +# work across those regions, so the derivation runs once per layer. This cache
+    +# makes it run once per group.
+    +#
+    +# The key is the KV-cache group index. It cannot be the identity of the input
+    +# arrays: `jax.jit` gives every pytree leaf its own tracer and does not
+    +# deduplicate a repeated leaf, so two layers in one group hold distinct tracers
+    +# for the same runtime buffer and `a is b` is false for every layer after the
+    +# first.
+    +#
+    +# The page geometry alone is not a safe key either. A model can hold more
+    +# KV-cache groups than distinct geometries, and two groups that share a geometry
+    +# must not share scatter indices.
+    +_LAYER_TO_KV_GROUP: dict[str, int] = {}
+    +
+    +
+    +def register_kv_cache_groups(kv_cache_groups) -> None:
+    +    """Records which KV-cache group owns each layer.
+    +
+    +    The runner calls this once, after it builds the groups. A compressor layer
+    +    cannot derive this for itself. The groups do not exist when the layer is
+    +    constructed, because vLLM builds them afterwards from the layers' own
+    +    specs.
+    +
+    +    The map holds only strings and integers, never a JAX array, so it is safe
+    +    at module scope and it never keeps a tracer alive.
+    +    """
+    +    _LAYER_TO_KV_GROUP.clear()
+    +    for group_id, group in enumerate(kv_cache_groups):
+    +        for layer_name in group.layer_names:
+    +            _LAYER_TO_KV_GROUP[layer_name] = group_id
+    +
+    +
+    +# The memo holds tracers, so an entry is valid only inside the trace that built
+    +# it. The wrapper context is a fresh object for every trace, so a change of
+    +# object marks a new trace and the memo is dropped. Reuse across traces would
+    +# raise an escaped-tracer error.
+    +#
+    +# The owner is held by weak reference, and the entries are dropped as soon as
+    +# the owner dies. A strong reference would outlive the trace and keep that
+    +# trace's whole context alive, including its `kv_caches`, `expert_indices_list`
+    +# and `shared_attn_metadata`, because the context manager that created it drops
+    +# its own reference on exit. The memo would then be the only thing holding a
+    +# finished trace, for as long as the process ran.
+    +#
+    +# A weak reference is also what makes the identity test sound. A dead reference
+    +# reads as `None`, which never matches a live context, so a new object at a
+    +# recycled address cannot be mistaken for the old one.
+    +_MEMO_OWNER = None
+    +_MEMO_TOKEN = 0
+    +_MEMO: dict = {}
+    +
+    +
+    +def _drop_memo(token: int) -> None:
+    +    """Empties the memo when the trace that filled it ends.
+    +
+    +    `token` names the owner that installed this callback. A callback from an
+    +    older owner does nothing, so a late finaliser cannot empty a newer trace's
+    +    entries.
+    +    """
+    +    if token == _MEMO_TOKEN:
+    +        _MEMO.clear()
+    +
+    +
+    +def _cached_metadata(wrapper_ctx, key, build):
+    +    """Returns the memoised metadata for `key`, or builds it and stores it.
+    +
+    +    A miss recomputes, which is what the code did before this cache existed.
+    +    So a miss costs speed and never correctness. A `None` key disables the memo
+    +    and always builds, which is the path for a layer the runner never
+    +    registered.
+    +    """
+    +    global _MEMO_OWNER, _MEMO_TOKEN
+    +    if wrapper_ctx is None or key is None:
+    +        return build()
+    +    owner = _MEMO_OWNER() if _MEMO_OWNER is not None else None
+    +    if owner is not wrapper_ctx:
+    +        _MEMO.clear()
+    +        _MEMO_TOKEN += 1
+    +        _MEMO_OWNER = weakref.ref(wrapper_ctx)
+    +        weakref.finalize(wrapper_ctx, _drop_memo, _MEMO_TOKEN)
+    +    if key not in _MEMO:
+    +        _MEMO[key] = build()
+    +    return _MEMO[key]
+    +
+     
+     class VllmCompressorStateCache(CompressorStateCache):
+         """TPU-compatible compressor state cache.
+    @@ -189,6 +278,10 @@
+                 data_spec,  # query_start_loc      [num_reqs + 1]
+                 data_spec,  # k_block_tables       [num_reqs * max_kv_blocks]
+                 data_spec,  # request_distribution [3]
+    +            data_spec,  # metadata: slot_mapping_slots
+    +            data_spec,  # metadata: boundary_positions
+    +            data_spec,  # metadata: boundary_req
+    +            data_spec,  # metadata: boundary_kv_slot
+                 cache_spec,  # cache
+             )
+             has_rope_cache = rope_cache is not None
+    @@ -205,7 +298,9 @@
+             def _compress(hidden_states, wkv_wgate, ape, norm_weight,
+                           cos_sin_cache, positions, state_block_tables,
+                           query_start_loc, k_block_tables, request_distribution,
+    -                      cache, *optional_caches):
+    +                      meta_slot_mapping, meta_boundary_positions,
+    +                      meta_boundary_req, meta_boundary_kv_slot, cache,
+    +                      *optional_caches):
+                 optional_caches = list(optional_caches)
+                 rope_c = optional_caches.pop(0) if has_rope_cache else None
+                 state_c = optional_caches.pop(0) if separate_state else None
+    @@ -230,6 +325,8 @@
+                     overlap=self.overlap,
+                     rms_eps=self.rms_norm_eps,
+                     quant_block=self._quant_block,
+    +                metadata=(meta_slot_mapping, meta_boundary_positions,
+    +                          meta_boundary_req, meta_boundary_kv_slot),
+                 )
+                 outs = [new_cache]
+                 if has_rope_cache:
+    @@ -239,17 +336,80 @@
+                 return tuple(outs) if len(outs) > 1 else outs[0]
+     
+             assert self._wkv_wgate_transposed
+    +        jax_positions = jax_view(positions)
+    +        jax_cos_sin_cache = jax_view(rotary_emb.cos_sin_cache)
+    +
+    +        # Everything `compressor_metadata` reads, keyed so that two layers of
+    +        # the same group and geometry share one result. `cache` must not appear:
+    +        # it is a different array per layer, so keying on it would never match.
+    +        # Only its second dimension matters, and that is a static int below.
+    +        state_source = cache if state_cache is None else state_cache
+    +        meta_statics = (
+    +            cache.shape[1],
+    +            state_source.shape[1],
+    +            jax_cos_sin_cache.shape[1],
+    +            self.compress_ratio,
+    +            self.state_cache.block_size,
+    +            self.head_dim,
+    +            self.overlap,
+    +        )
+    +        meta_arrays = (
+    +            jax_positions,
+    +            state_metadata.block_tables,
+    +            state_metadata.query_start_loc,
+    +            k_cache_metadata.block_tables,
+    +            state_metadata.request_distribution,
+    +        )
+    +
+    +        def _metadata(positions_, state_block_tables, query_start_loc_,
+    +                      k_block_tables, request_distribution):
+    +            return compressor_metadata(
+    +                positions=positions_,
+    +                block_table=state_block_tables,
+    +                query_start_loc=query_start_loc_,
+    +                kv_block_table=k_block_tables,
+    +                distribution=request_distribution,
+    +                physical_page_size=meta_statics[0],
+    +                state_physical_page_size=meta_statics[1],
+    +                rope_head_dim=meta_statics[2],
+    +                compress_ratio=self.compress_ratio,
+    +                state_block_size=self.state_cache.block_size,
+    +                head_dim=self.head_dim,
+    +                overlap=self.overlap,
+    +            )
+    +
+    +        def _build_metadata():
+    +            return jax.shard_map(
+    +                _metadata,
+    +                mesh=mesh,
+    +                in_specs=(data_spec, ) * len(meta_arrays),
+    +                out_specs=(data_spec, ) * 4,
+    +                check_vma=False,
+    +            )(*meta_arrays)
+    +
+    +        # Two layers in one KV-cache group receive the same runtime buffer for
+    +        # every array above, so their metadata is equal and one may serve both.
+    +        # A layer the runner never registered gets a `None` key and builds.
+    +        state_group = _LAYER_TO_KV_GROUP.get(self.state_cache.prefix)
+    +        k_group = _LAYER_TO_KV_GROUP.get(self.k_cache_prefix)
+    +        if state_group is None or k_group is None:
+    +            meta_key = None
+    +        else:
+    +            meta_key = (state_group, k_group) + meta_statics
+    +        metadata = _cached_metadata(wrapper_ctx, meta_key, _build_metadata)
+    +
+             operands = (
+                 jax_view(hidden_states),
+                 jax_view(self.fused_wkv_wgate.weight),
+                 jax_view(self.ape),
+                 jax_view(self.norm.weight),
+    -            jax_view(rotary_emb.cos_sin_cache),
+    -            jax_view(positions),
+    +            jax_cos_sin_cache,
+    +            jax_positions,
+                 state_metadata.block_tables,
+                 state_metadata.query_start_loc,
+                 k_cache_metadata.block_tables,
+                 state_metadata.request_distribution,
+    +            *metadata,
+                 cache,
+             )
+             if has_rope_cache:
+    diff -urN src-baseline/tpu_inference/runner/kv_cache_manager.py src-fix/tpu_inference/runner/kv_cache_manager.py
+    --- a/tpu_inference/runner/kv_cache_manager.py	2026-09-01 15:15:52.068001056 +0000
+    +++ b/tpu_inference/runner/kv_cache_manager.py	2026-09-01 20:27:08.882366466 +0000
+    @@ -721,6 +721,20 @@
+             if not kv_cache_config.kv_cache_groups:
+                 return
+     
+    +        # Tell the DeepSeek-V4 compressor which group owns each layer. The
+    +        # compressor derives identical scatter indices for every layer in a
+    +        # group, and the group index is the only key that lets it compute them
+    +        # once. It cannot work this out for itself, because the groups are
+    +        # built here, from the layers' own specs, after the layers exist.
+    +        #
+    +        # Import inside the function. The compressor module imports layer and
+    +        # model code that imports this runner, so a module-scope import is a
+    +        # cycle.
+    +        from tpu_inference.layers.vllm.custom_ops.experimental.deepseek_v4 \
+    +            import deepseek_v4_compressor
+    +        deepseek_v4_compressor.register_kv_cache_groups(
+    +            kv_cache_config.kv_cache_groups)
+    +
+             layer_name_to_spec = {}
+             for group in kv_cache_config.kv_cache_groups:
+                 group_spec = group.kv_cache_spec
+    diff -urN src-base/tpu_inference/kernels/sparse_core/ragged_gather_reduce_v2.py src-sc/tpu_inference/kernels/sparse_core/ragged_gather_reduce_v2.py
+    --- a/tpu_inference/kernels/sparse_core/ragged_gather_reduce_v2.py
+    +++ b/tpu_inference/kernels/sparse_core/ragged_gather_reduce_v2.py
+    @@ -614,7 +614,7 @@
+         # also keeps the kernel off configs with num_row_partitions > num_simd_lanes.
+         dtype_bytes = jax.dtypes.itemsize_bits(x.dtype) // 8
+         if (jnp.size(x) * dtype_bytes * 2
+    -            < pltpu.get_tpu_info().vmem_capacity_bytes * 0.6):
+    +            < pltpu.get_tpu_info().vmem_capacity_bytes * 0.3):
+             return _fallback_implementation(x, indices, topk_weights,
+                                             valid_rows_mask, reduce_group_size)
+     
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: dsv4-v6e16
+  labels:
+    app: dsv4-v6e16
+spec:
+  clusterIP: None
+  selector:
+    app: dsv4-v6e16
+  ports:
+    - name: ray-client
+      port: 10001
+      targetPort: 10001
+    - name: ray-dashboard
+      port: 8265
+      targetPort: 8265
+    - name: gcs
+      port: 6379
+      targetPort: 6379
+    - name: vllm
+      port: 8000
+      targetPort: 8000
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: dsv4-v6e16
+spec:
+  parallelism: 4
+  completions: 4
+  completionMode: Indexed
+  backoffLimit: 0
+  template:
+    metadata:
+      labels:
+        app: dsv4-v6e16
+    spec:
+      subdomain: dsv4-v6e16
+      restartPolicy: Never
+      serviceAccountName: dsv4-sa
+      nodeSelector:
+        cloud.google.com/gke-tpu-accelerator: tpu-v6e-slice
+        cloud.google.com/gke-tpu-topology: 4x4
+      dnsPolicy: ClusterFirst
+      volumes:
+        - name: dshm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 16Gi
+        - name: jaxcache
+          hostPath:
+            path: /var/tmp/dsv4-jax-cache
+            type: DirectoryOrCreate
+        - name: patchdir
+          configMap:
+            name: dsv4-hoist-patch
+      containers:
+        - name: worker
+          # Use your organization's tpu-inference image with INT8 MoE and JAX/XLA support
+          image: <YOUR_CONTAINER_REGISTRY>/tpu-inference:<TAG>
+          imagePullPolicy: IfNotPresent
+          resources:
+            limits:
+              google.com/tpu: "4"
+            requests:
+              google.com/tpu: "4"
+              memory: 200Gi
+          volumeMounts:
+            - name: dshm
+              mountPath: /dev/shm
+            - name: jaxcache
+              mountPath: /jaxcache
+            - name: patchdir
+              mountPath: /patch
+              readOnly: true
+          ports:
+            - containerPort: 6379
+            - containerPort: 8000
+          env:
+            - name: TPU_MULTIHOST_BACKEND
+              value: ray
+            - name: JAX_PLATFORMS
+              value: ""
+            - name: RAY_EXPERIMENTAL_NOSET_TPU_VISIBLE_CHIPS
+              value: "1"
+            - name: TPU_SKIP_MDS_QUERY
+              value: "1"
+            - name: JAX_COMPILATION_CACHE_DIR
+              value: /jaxcache
+            - name: TPU_BACKEND_TYPE
+              value: jax
+            # Overlap all-gather and reduce-scatter collective communications with matmuls
+            - name: LIBTPU_INIT_ARGS
+              value: "--xla_tpu_all_gather_collective_matmul_mode=post_spmd --xla_tpu_reduce_scatter_collective_matmul_mode=post_spmd"
+            - name: VLLM_DISABLE_SHARED_EXPERTS_STREAM
+              value: "1"
+            - name: MODEL_IMPL_TYPE
+              value: vllm
+            - name: DRAFT_MODEL_IMPL_TYPE
+              value: vllm
+            - name: NEW_MODEL_DESIGN
+              value: "1"
+            - name: VLLM_MLA_DISABLE
+              value: "0"
+            - name: MOE_REQUANTIZE_BLOCK_SIZE
+              value: "512"
+            - name: MOE_REQUANTIZE_WEIGHT_DTYPE
+              value: int8
+            - name: REQUANTIZE_WEIGHT_DTYPE
+              value: int8
+            - name: HEAD_HOST
+              value: dsv4-v6e16-0.dsv4-v6e16
+            - name: MODEL_URI
+              value: gs://<YOUR_GCS_BUCKET>/deepseek-v4-flash
+            - name: TPU_WORKER_HOSTNAMES
+              value: dsv4-v6e16-0.dsv4-v6e16,dsv4-v6e16-1.dsv4-v6e16,dsv4-v6e16-2.dsv4-v6e16,dsv4-v6e16-3.dsv4-v6e16
+            - name: TPU_WORKER_ID
+              valueFrom:
+                fieldRef:
+                  apiVersion: v1
+                  fieldPath: metadata.annotations['batch.kubernetes.io/job-completion-index']
+            - name: JOB_COMPLETION_INDEX
+              valueFrom:
+                fieldRef:
+                  apiVersion: v1
+                  fieldPath: metadata.labels['batch.kubernetes.io/job-completion-index']
+          command:
+            - /bin/bash
+            - -lc
+          args:
+            - |
+              set -euo pipefail
+              IDX="${JOB_COMPLETION_INDEX:?}"
+              echo "[$(date -Is)] index=${IDX} head=${HEAD_HOST}"
+
+              echo "[$(date -Is)] applying hoist-metadata.patch"
+              patch -p1 --batch --forward -d /workspace/tpu_inference \
+                < /patch/hoist-metadata.patch
+              python3 -c "import ast,sys;[ast.parse(open(f).read()) for f in sys.argv[1:]]" \
+                $(awk '/^[+][+][+] b\//{sub(/^b\//, "", $2); print "/workspace/tpu_inference/" $2}' /patch/hoist-metadata.patch)
+              echo "[$(date -Is)] patch applied and parsed"
+
+              echo "Checking metadata server connectivity..."
+              for i in $(seq 1 30); do
+                if curl -s -f -m 5 -H "Metadata-Flavor: Google" "http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token" >/dev/null 2>&1; then
+                  echo "Metadata service ready."
+                  break
+                fi
+                echo "Waiting for metadata service ($i/30)..."
+                sleep 2
+              done
+
+              if [ "${IDX}" = "0" ]; then
+                ray start --head --port=6379 --dashboard-host=0.0.0.0
+                
+                echo "Waiting for all 4 nodes (16 TPUs) to join Ray cluster..."
+                for i in $(seq 1 90); do
+                  tpu_ok=$(ray status 2>/dev/null | grep -E "16.0 TPU|16/16 TPU" || true)
+                  if [ -n "${tpu_ok}" ]; then
+                    echo "All 16 TPUs active in Ray cluster: ${tpu_ok}"
+                    break
+                  fi
+                  echo "Waiting for cluster join ($i/90)... current: $(ray status 2>/dev/null | grep TPU || true)"
+                  sleep 5
+                done
+                ray status || true
+
+                exec vllm serve "${MODEL_URI}" \
+                  --served-model-name deepseek-ai/DeepSeek-V4-Flash \
+                  --load-format=runai_streamer \
+                  --trust-remote-code \
+                  --kv-cache-dtype=fp8 \
+                  --tensor-parallel-size 16 \
+                  --enable-expert-parallel \
+                  --additional_config '{"sharding": {"sharding_strategy": {"enable_dp_attention": true}}}' \
+                  --gpu-memory-utilization 0.85 \
+                  --no-enable-prefix-caching \
+                  --max-model-len 2048 \
+                  --max-num-batched-tokens 2048 \
+                  --max-num-seqs 512 \
+                  --host 0.0.0.0 --port 8000
+              else
+                until getent hosts "${HEAD_HOST}" >/dev/null 2>&1; do
+                  echo "waiting for head DNS"; sleep 5
+                done
+                exec ray start --block --address="${HEAD_HOST}:6379"
+              fi
