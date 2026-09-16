@@ -18,6 +18,24 @@ Those figures come from the patched serving arm. The full three-shape sweep, its
 data and the manifest that produced it are in
 [`models/DeepSeekV4-Flash-v6e16/`](./models/DeepSeekV4-Flash-v6e16).
 
+### 1.1 DeepSeek-V4.1-Flash
+
+The repository now also carries a serving recipe for **DeepSeek-V4.1-Flash** (552B total / 16B
+active parameters, 384 routed experts) on the same 16-chip slice, in
+[`models/DeepSeekV4.1-Flash-v6e16/`](./models/DeepSeekV4.1-Flash-v6e16).
+
+* **5,137.3 output tokens/sec** at $C=512$ on the balanced 1k/1k workload (321.1 tok/s per chip).
+* **8,140 tok/s of steady-state decode** at $C=512$, which is near parity with V4-Flash. The
+  end-to-end gap is prefill.
+* **100% request success rate** — 1,028 requests across ten concurrency levels.
+* Greedy decoding is deterministic: 40/40 byte-identical over three passes at $C=1$, and 100/100
+  identical on synthetic key-value-slot prompts at $C=16$.
+
+V4.1-Flash had no TPU path before this work. It needs a new backend of about 4,200 lines: the
+decoder backbone, CSA2 attention, the compressor, the indexer, a 55-array key-value cache layout
+for 51 layers, and a fix to the compressed rotary record, which is stored as two byte planes rather
+than interleaved `bf16`. That last one is what makes the model produce correct tokens at all.
+
 ---
 
 ## 2. Benchmark Results
@@ -233,11 +251,16 @@ Find all deployment manifests and benchmark scripts in the [`recipes/`](./recipe
 │   ├── benchmark.py                       # Async streaming benchmark suite
 │   └── publish_to_ubench.py               # Publishes results.json to the UBench BigQuery backend
 └── models/
-    └── DeepSeekV4-Flash-v6e16/
-        ├── README.md                      # Serving recipe and the full concurrency sweep
-        ├── dsv4-flash-v6e16-serving.yaml  # Patched serving Job, Service and patch ConfigMap
-        ├── scripts/                       # Sweep client and report generator
-        └── results/                       # Report, PNG charts and every raw measurement
+    ├── DeepSeekV4-Flash-v6e16/
+    │   ├── README.md                      # Serving recipe and the full concurrency sweep
+    │   ├── dsv4-flash-v6e16-serving.yaml  # Patched serving Job, Service and patch ConfigMap
+    │   ├── scripts/                       # Sweep client and report generator
+    │   └── results/                       # Report, PNG charts and every raw measurement
+    └── DeepSeekV4.1-Flash-v6e16/
+        ├── README.md                      # Serving recipe, kernel work, and the 1k/1k sweep
+        ├── dsv41-flash-v6e16-serving.yaml # Serving Job, Service and model-code ConfigMap
+        ├── scripts/                       # Sweep, smoke, determinism and GPQA clients
+        └── results/                       # Chart and every raw measurement
 ```
 
 ---
