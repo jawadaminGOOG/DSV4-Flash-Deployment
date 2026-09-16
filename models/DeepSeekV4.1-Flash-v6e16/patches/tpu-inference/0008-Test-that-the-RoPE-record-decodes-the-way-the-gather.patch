@@ -1,0 +1,57 @@
+From 41cfa82131dfa5d2e7cb1683476f8815d330a6f5 Mon Sep 17 00:00:00 2001
+From: Jawad Amin <jawadamin@google.com>
+Date: Sat, 12 Sep 2026 10:47:07 +0000
+Subject: [PATCH 8/8] Test that the RoPE record decodes the way the gather
+ decodes it
+
+The existing record test compares two records against each other, so it
+passes for any self-consistent layout. It passed while the writer and the
+reader disagreed.
+
+Decode the record instead: take the high byte of channel i from offset i and
+the low byte from offset 64 + i, rebuild the value as (high << 8) | low, and
+compare against the rotated latent.
+---
+ .../vllm/test_deepseek_v41_compressor.py      | 29 +++++++++++++++++++
+ 1 file changed, 29 insertions(+)
+
+diff --git a/tests/layers/vllm/test_deepseek_v41_compressor.py b/tests/layers/vllm/test_deepseek_v41_compressor.py
+index b6ed679d..8c6aa8a1 100644
+--- a/tests/layers/vllm/test_deepseek_v41_compressor.py
++++ b/tests/layers/vllm/test_deepseek_v41_compressor.py
+@@ -286,6 +286,35 @@ def test_build_kv_records_rotates_at_the_group_position():
+     assert bool(jnp.all(nope[:, 455:] == 0))
+ 
+ 
++def test_build_kv_records_writes_the_rope_byte_planes_the_gather_reads():
++    """The RoPE record must decode the way ``csa_gather`` decodes it.
++
++    ``csa_gather.process_rope`` reads the high byte of channel ``i`` at offset
++    ``i`` and the low byte at offset ``64 + i``, then rebuilds the value as
++    ``(high << 8) | low``. An interleaved little-endian record passes every
++    self-consistency check and still decodes to an unrelated number in every
++    channel, so this test decodes the record instead of comparing records.
++    """
++    generator = torch.Generator().manual_seed(11)
++    latent = torch.randn(3, HEAD_DIM, generator=generator,
++                         dtype=torch.float32)
++    angles = torch.rand(16, 32, generator=generator, dtype=torch.float32) * 6.0
++    cos_sin = torch.cat([angles.cos(), angles.sin()], dim=-1)
++    positions = jnp.asarray([0, 2, 4], jnp.int32)
++
++    rotated = _gptj_rope(_as_jax(latent), positions, _as_jax(cos_sin))
++    _, rope = build_kv_records(_as_jax(latent), positions, _as_jax(cos_sin), 2,
++                               512)
++
++    rope_channels = rope.shape[1] // 2
++    high = rope[:, :rope_channels].astype(jnp.uint16)
++    low = rope[:, rope_channels:].astype(jnp.uint16)
++    decoded = ((high << 8) | low).view(jnp.bfloat16)
++
++    expected = rotated[:, -rope_channels:].astype(jnp.bfloat16)
++    assert bool(jnp.array_equal(decoded, expected))
++
++
+ @pytest.mark.parametrize("row,expected", [(0, 40), (3, 43), (8, 72), (11, 75)])
+ def test_paged_slots_walks_the_block_table(row: int, expected: int):
+     """A row maps to ``block * page_size + offset`` through the block table."""

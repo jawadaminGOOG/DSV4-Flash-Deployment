@@ -1,0 +1,61 @@
+From f3393f8e01d473c0fcf750918e23d11047351e1b Mon Sep 17 00:00:00 2001
+From: Jawad Amin <jawadamin@google.com>
+Date: Sat, 12 Sep 2026 10:34:27 +0000
+Subject: [PATCH 7/8] Write the compressed RoPE record in the byte-plane layout
+ the gather reads
+
+The compressor packed the 64 rotary channels as interleaved little-endian
+BF16. `csa_gather` reads a different layout: it takes the high byte of
+channel i from offset i, the low byte from offset 64 + i, and rebuilds the
+value as (high << 8) | low. Every channel therefore decoded to an unrelated
+number, and the sparse attention kernel attended against an arbitrary key.
+
+The symptom was a finite but enormous value out of the first
+compressed-attention layer, which the next RMSNorm turned into a nan that
+spread to every later layer.
+
+Pack the record as two byte planes to match the reader.
+
+Measured on one host of a v6e slice with a normal latent. Before the change
+the gathered RoPE reached 3.14e38 and held a nan where the written values
+reached 2.55, and the sparse kernel returned 1.07e38. After it the gathered
+RoPE returns 2.55 and the kernel returns 4.44.
+---
+ .../deepseek_v41/deepseek_v41_compressor.py     | 17 +++++++++++++----
+ 1 file changed, 13 insertions(+), 4 deletions(-)
+
+diff --git a/tpu_inference/layers/vllm/custom_ops/experimental/deepseek_v41/deepseek_v41_compressor.py b/tpu_inference/layers/vllm/custom_ops/experimental/deepseek_v41/deepseek_v41_compressor.py
+index b1011a04..2ea41a6f 100644
+--- a/tpu_inference/layers/vllm/custom_ops/experimental/deepseek_v41/deepseek_v41_compressor.py
++++ b/tpu_inference/layers/vllm/custom_ops/experimental/deepseek_v41/deepseek_v41_compressor.py
+@@ -249,8 +249,14 @@ def build_kv_records(
+ 
+     A latent stands for its whole group, so it rotates at the position of the
+     group's first token. The NoPE record holds 448 FP8 E4M3 bytes then 7 E8M0
+-    scale bytes, zero-padded to the record width. The RoPE record holds the 64
+-    rotary channels in BF16.
++    scale bytes, zero-padded to the record width.
++
++    The RoPE record holds the 64 rotary channels in BF16 as two byte planes,
++    not as interleaved values. `csa_gather` reads the high byte of channel `i`
++    at offset `i` and the low byte at offset `64 + i`, and rebuilds the value
++    as `(high << 8) | low`. A record written as interleaved little-endian BF16
++    therefore decodes to a different number in every channel, and the sparse
++    kernel then sees an arbitrary key.
+ 
+     This is a pure function of its arguments so a test can compare it against
+     the CUDA kernel without a mesh.
+@@ -263,8 +269,11 @@ def build_kv_records(
+     nope_record = nope_record.at[:, :NOPE_CHANNELS].set(values)
+     nope_record = nope_record.at[:, NOPE_CHANNELS:NOPE_CHANNELS +
+                                  scales.shape[1]].set(scales)
+-    rope_record = rotated[:, NOPE_CHANNELS:].astype(jnp.bfloat16).view(
+-        jnp.uint8)
++    rope_bytes = rotated[:, NOPE_CHANNELS:].astype(jnp.bfloat16).view(
++        jnp.uint8).reshape(latent.shape[0], ROPE_CHANNELS, 2)
++    # The device is little-endian, so index 0 of a pair is the low byte.
++    rope_record = jnp.concatenate([rope_bytes[:, :, 1], rope_bytes[:, :, 0]],
++                                  axis=1)
+     return nope_record, rope_record
+ 
+ 

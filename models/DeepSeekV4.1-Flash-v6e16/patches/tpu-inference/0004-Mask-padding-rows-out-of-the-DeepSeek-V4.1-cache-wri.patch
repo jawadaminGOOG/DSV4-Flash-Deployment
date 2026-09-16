@@ -1,0 +1,571 @@
+From 9ed9c57328fb7cea44cd808ad9c8b3a5ff10573f Mon Sep 17 00:00:00 2001
+From: Jawad Amin <jawadamin@google.com>
+Date: Thu, 10 Sep 2026 19:54:50 +0000
+Subject: [PATCH 4/8] Mask padding rows out of the DeepSeek V4.1 cache writes
+
+The TPU runner pads the token axis up to a compiled bucket. A padding row
+inherits the last request's id, and its position points at a live cache
+slot. The CUDA kernels get a slot_mapping of -1 for such a row, but the TPU
+attention metadata does not carry slot_mapping, so the three JAX scatters
+in the V4.1 path wrote the padding through.
+
+Add _real_tokens, and mask on it in the compressor ring store, the
+compressed KV insert, and the indexer key store.
+
+Lift the ratio-2 pooling core into pool_ratio_two and the record packing
+into build_kv_records. Both are pure functions of their arguments, so a
+test drives the same code the layer runs.
+
+Add numerical tests that compare each primitive against an independent
+PyTorch reference of the CUDA kernel it replaces. The rotation reference
+uses complex multiplication and the pooling reference walks one group at a
+time, so a shared structure cannot hide a shared mistake.
+
+Measured on a v6e-16 pod with JAX on CPU: 12 tests pass. Without the
+_real_tokens mask, three padding rows corrupt 3072 of 16384 ring elements.
+---
+ .../vllm/test_deepseek_v41_compressor.py      | 295 ++++++++++++++++++
+ .../deepseek_v41/deepseek_v41_compressor.py   | 181 +++++++----
+ .../deepseek_v41/deepseek_v41_indexer.py      |   5 +-
+ 3 files changed, 422 insertions(+), 59 deletions(-)
+ create mode 100644 tests/layers/vllm/test_deepseek_v41_compressor.py
+
+diff --git a/tests/layers/vllm/test_deepseek_v41_compressor.py b/tests/layers/vllm/test_deepseek_v41_compressor.py
+new file mode 100644
+index 00000000..b6ed679d
+--- /dev/null
++++ b/tests/layers/vllm/test_deepseek_v41_compressor.py
+@@ -0,0 +1,295 @@
++# Copyright 2026 Google LLC
++#
++# Licensed under the Apache License, Version 2.0 (the "License");
++# you may not use this file except in compliance with the License.
++# You may obtain a copy of the License at
++#
++#     http://www.apache.org/licenses/LICENSE-2.0
++#
++# Unless required by applicable law or agreed to in writing, software
++# distributed under the License is distributed on an "AS IS" BASIS,
++# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++# See the License for the specific language governing permissions and
++# limitations under the License.
++"""Numerical tests for the DeepSeek-V4.1 compressor primitives.
++
++Each test compares a JAX primitive against an independent PyTorch reference of
++the CUDA kernel it replaces. The references are written in a different
++formulation from the code under test where that is possible: the rotation uses
++complex multiplication, and the pooling reference iterates one group at a time.
++A transcription that shares the original's structure can share its mistakes.
++
++The tests call the module-level functions the layer itself calls, not copies of
++them, so a change to the layer's arithmetic fails a test here.
++"""
++
++import sys
++import types
++
++import jax
++import jax.numpy as jnp
++import pytest
++import torch
++
++HEAD_DIM = 512
++STATE_DIM = 2 * HEAD_DIM
++EPS = 1e-20
++
++
++def _stub_upstream_base_classes() -> None:
++    """Install placeholders for ``vllm.models.deepseek_v4_1`` when it is absent.
++
++    The compressor module imports two base classes from upstream vLLM at module
++    scope. The functions under test are pure JAX and never reach those classes,
++    but the import must still resolve. A vLLM old enough to predate V4.1 can
++    run these tests with the placeholders.
++    """
++    try:
++        import vllm.models.deepseek_v4_1.compressor  # noqa: F401
++        return
++    except ImportError:
++        pass
++
++    class _Placeholder:
++        pass
++
++    compressor = types.ModuleType("vllm.models.deepseek_v4_1.compressor")
++    compressor.CompressorStateCache = _Placeholder
++    compressor.DeepseekCompressor = _Placeholder
++    package = types.ModuleType("vllm.models.deepseek_v4_1")
++    package.compressor = compressor
++    sys.modules.setdefault("vllm.models", types.ModuleType("vllm.models"))
++    sys.modules["vllm.models.deepseek_v4_1"] = package
++    sys.modules["vllm.models.deepseek_v4_1.compressor"] = compressor
++
++
++_stub_upstream_base_classes()
++
++from tpu_inference.layers.vllm.custom_ops.experimental.deepseek_v41.deepseek_v41_compressor import (  # noqa: E402
++    _gptj_rope, _paged_slots, _rms_norm, build_kv_records, pool_ratio_two,
++    quantize_e8m0)
++
++# Two units of last place in BF16. The pooled value is computed in float32 and
++# rounded once, so the two paths may disagree by a rounding step.
++BF16_TOLERANCE = 2**-7
++
++
++def _assert_bf16_close(actual: jax.Array, expected: torch.Tensor) -> None:
++    got = torch.from_numpy(jax.device_get(actual.astype(jnp.float32)))
++    want = expected.to(torch.bfloat16).to(torch.float32)
++    scale = torch.clamp(want.abs(), min=1e-6)
++    error = ((got - want).abs() / scale).max().item()
++    assert error <= BF16_TOLERANCE, f"relative error {error} over one group"
++
++
++def _reference_pool(rows: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
++    """One pooled and normalized latent from the rows of a single group.
++
++    This follows ``_fused_save_compress_norm_kernel``: the gate is a softmax
++    over the group of the score half, the pooled value is the gated sum of the
++    kv half, and the RMSNorm runs on the float32 pooled value with no
++    intermediate rounding.
++    """
++    rows = rows.to(torch.float32)
++    gate = torch.softmax(rows[:, HEAD_DIM:], dim=0)
++    pooled = (rows[:, :HEAD_DIM] * gate).sum(0)
++    variance = pooled.pow(2).mean()
++    return pooled * torch.rsqrt(variance + EPS) * weight.to(torch.float32)
++
++
++def _pool_inputs(num_tokens: int, seed: int = 0):
++    generator = torch.Generator().manual_seed(seed)
++    kv_score = torch.randn(num_tokens,
++                           STATE_DIM,
++                           generator=generator,
++                           dtype=torch.float32)
++    weight = torch.rand(HEAD_DIM, generator=generator,
++                        dtype=torch.float32) + 0.5
++    return kv_score, weight
++
++
++def _as_jax(tensor: torch.Tensor) -> jax.Array:
++    return jnp.asarray(tensor.numpy())
++
++
++# A ring page holds ``CAPACITY`` rows. Every request owns exactly one page, so
++# the page index of a ring row is always zero and the slot is the row itself.
++CAPACITY = 4
++NUM_PAGES = 4
++
++
++def _ring_and_tables(page_of_request: list[int]):
++    ring = jnp.zeros((NUM_PAGES, CAPACITY, STATE_DIM), jnp.float32)
++    block_tables = jnp.asarray(page_of_request, jnp.int32)
++    return ring, block_tables
++
++
++def test_pool_ratio_two_matches_reference_in_one_chunk():
++    """Every closing row pools its own pair, and no other pair."""
++    kv_score, weight = _pool_inputs(8)
++    ring, block_tables = _ring_and_tables([1])
++    query_start_loc = jnp.asarray([0, 8], jnp.int32)
++    positions = jnp.arange(8, dtype=jnp.int32)
++
++    latent, _ = pool_ratio_two(_as_jax(kv_score), positions, query_start_loc,
++                               block_tables, ring, _as_jax(weight), HEAD_DIM,
++                               EPS)
++
++    for position in (1, 3, 5, 7):
++        expected = _reference_pool(kv_score[position - 1:position + 1], weight)
++        _assert_bf16_close(latent[position], expected)
++
++
++def test_pool_ratio_two_carries_a_group_across_a_chunk_boundary():
++    """A group split by chunked prefill pools the same pair as an unsplit one.
++
++    The first chunk ends after position 4, so the group {4, 5} straddles the
++    boundary. Row 5 must reach row 4 through the ring.
++    """
++    kv_score, weight = _pool_inputs(8, seed=1)
++    ring, block_tables = _ring_and_tables([1])
++
++    _, ring_after = pool_ratio_two(_as_jax(kv_score[:5]),
++                                   jnp.arange(5, dtype=jnp.int32),
++                                   jnp.asarray([0, 5], jnp.int32),
++                                   block_tables, ring, _as_jax(weight),
++                                   HEAD_DIM, EPS)
++
++    latent, _ = pool_ratio_two(_as_jax(kv_score[5:]),
++                               jnp.arange(5, 8, dtype=jnp.int32),
++                               jnp.asarray([0, 3], jnp.int32), block_tables,
++                               ring_after, _as_jax(weight), HEAD_DIM, EPS)
++
++    # Row 0 of the second chunk is position 5, the row that closes the
++    # straddling group.
++    expected = _reference_pool(kv_score[4:6], weight)
++    _assert_bf16_close(latent[0], expected)
++
++
++def test_pool_ratio_two_keeps_only_the_last_capacity_rows():
++    """The ring holds the chunk's final rows, one row for each position."""
++    kv_score, weight = _pool_inputs(6, seed=2)
++    ring, block_tables = _ring_and_tables([2])
++
++    _, ring_after = pool_ratio_two(_as_jax(kv_score),
++                                   jnp.arange(6, dtype=jnp.int32),
++                                   jnp.asarray([0, 6], jnp.int32),
++                                   block_tables, ring, _as_jax(weight),
++                                   HEAD_DIM, EPS)
++
++    page = torch.from_numpy(jax.device_get(ring_after[2]))
++    for position in range(2, 6):
++        torch.testing.assert_close(page[position % CAPACITY],
++                                   kv_score[position])
++
++
++def test_pool_ratio_two_ignores_padding_rows():
++    """A padded token row must not write the ring.
++
++    The runner pads the token axis to a compiled bucket. A padding row inherits
++    the last request's id, and its position points at a live ring slot. Without
++    the real-token mask the padding overwrites a row the next chunk reads.
++    """
++    kv_score, weight = _pool_inputs(8, seed=3)
++    ring, block_tables = _ring_and_tables([3])
++    positions = jnp.arange(8, dtype=jnp.int32)
++
++    _, unpadded = pool_ratio_two(_as_jax(kv_score[:5]), positions[:5],
++                                 jnp.asarray([0, 5], jnp.int32), block_tables,
++                                 ring, _as_jax(weight), HEAD_DIM, EPS)
++
++    # Three padding rows. Their positions land on ring slots 3, 0 and 1, which
++    # the five real rows already own.
++    padded_positions = jnp.asarray([0, 1, 2, 3, 4, 3, 4, 5], jnp.int32)
++    _, padded = pool_ratio_two(_as_jax(kv_score), padded_positions,
++                               jnp.asarray([0, 5, 5, 5], jnp.int32),
++                               jnp.tile(block_tables, 3), ring,
++                               _as_jax(weight), HEAD_DIM, EPS)
++
++    torch.testing.assert_close(torch.from_numpy(jax.device_get(padded)),
++                               torch.from_numpy(jax.device_get(unpadded)))
++
++
++def test_rms_norm_keeps_a_tiny_epsilon_meaningful():
++    """V4.1-Flash sets ``rms_norm_eps`` to 1e-20, which needs float32."""
++    generator = torch.Generator().manual_seed(4)
++    x = torch.randn(3, HEAD_DIM, generator=generator, dtype=torch.float32)
++    weight = torch.rand(HEAD_DIM, generator=generator, dtype=torch.float32)
++
++    got = _rms_norm(_as_jax(x), _as_jax(weight), EPS)
++    want = x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + EPS) * weight
++
++    torch.testing.assert_close(torch.from_numpy(jax.device_get(got)),
++                               want,
++                               rtol=1e-6,
++                               atol=1e-6)
++
++
++def test_gptj_rope_matches_a_complex_rotation():
++    """The interleaved rotation is a complex multiply on each channel pair."""
++    generator = torch.Generator().manual_seed(5)
++    x = torch.randn(4, HEAD_DIM, generator=generator, dtype=torch.float32)
++    angles = torch.rand(16, 32, generator=generator, dtype=torch.float32) * 6.0
++    cos_sin = torch.cat([angles.cos(), angles.sin()], dim=-1)
++    positions = torch.tensor([0, 3, 7, 15], dtype=torch.int32)
++
++    got = _gptj_rope(_as_jax(x), _as_jax(positions), _as_jax(cos_sin))
++
++    tail = torch.view_as_complex(x[:, -64:].reshape(4, 32, 2).contiguous())
++    rotor = torch.polar(torch.ones(4, 32), angles[positions.long()])
++    want = torch.cat(
++        [x[:, :-64],
++         torch.view_as_real(tail * rotor).reshape(4, 64)], dim=-1)
++
++    torch.testing.assert_close(torch.from_numpy(jax.device_get(got)),
++                               want,
++                               rtol=1e-5,
++                               atol=1e-5)
++
++
++def test_quantize_e8m0_round_trips_within_fp8_precision():
++    """A reader recovers the value with ``value * 2 ** (scale - 127)``."""
++    generator = torch.Generator().manual_seed(6)
++    x = torch.randn(2, 448, generator=generator, dtype=torch.float32) * 30.0
++
++    values, scales = quantize_e8m0(_as_jax(x), 64)
++    decoded = jnp.asarray(values).view(jnp.float8_e4m3fn).astype(jnp.float32)
++    factor = jnp.exp2(scales.astype(jnp.float32) - 127.0)
++    restored = decoded.reshape(2, 7, 64) * factor[:, :, None]
++
++    error = (torch.from_numpy(jax.device_get(restored)).reshape(2, 448) -
++             x).abs() / x.abs().clamp(min=1e-6)
++    assert error.max().item() <= 0.07, "FP8 E4M3 holds three mantissa bits"
++
++
++def test_build_kv_records_rotates_at_the_group_position():
++    """Both rows of a group rotate at the position of the group's first row."""
++    generator = torch.Generator().manual_seed(7)
++    latent = torch.randn(1, HEAD_DIM, generator=generator,
++                         dtype=torch.float32).repeat(4, 1)
++    angles = torch.rand(16, 32, generator=generator, dtype=torch.float32) * 6.0
++    cos_sin = torch.cat([angles.cos(), angles.sin()], dim=-1)
++    # One latent at four positions. Rows 0 and 1 form group 2 and must produce
++    # the same record. Row 2 opens group 3 and must not.
++    positions = jnp.asarray([4, 5, 6, 7], jnp.int32)
++
++    nope, rope = build_kv_records(_as_jax(latent), positions,
++                                  _as_jax(cos_sin), 2, 512)
++
++    assert nope.shape == (4, 512) and rope.shape == (4, 128)
++    torch.testing.assert_close(torch.from_numpy(jax.device_get(nope[0])),
++                               torch.from_numpy(jax.device_get(nope[1])))
++    torch.testing.assert_close(torch.from_numpy(jax.device_get(rope[0])),
++                               torch.from_numpy(jax.device_get(rope[1])))
++    assert not jnp.array_equal(rope[0], rope[2]), "group 3 rotates differently"
++    # The record is 448 quantized bytes, then 7 scale bytes, then zero padding.
++    assert bool(jnp.all(nope[:, 455:] == 0))
++
++
++@pytest.mark.parametrize("row,expected", [(0, 40), (3, 43), (8, 72), (11, 75)])
++def test_paged_slots_walks_the_block_table(row: int, expected: int):
++    """A row maps to ``block * page_size + offset`` through the block table."""
++    block_tables = jnp.asarray([5, 9, 0, 0], jnp.int32)
++    got = _paged_slots(block_tables, jnp.asarray([0], jnp.int32),
++                       jnp.asarray([row], jnp.int32), 2, 8)
++    assert int(got[0]) == expected
+diff --git a/tpu_inference/layers/vllm/custom_ops/experimental/deepseek_v41/deepseek_v41_compressor.py b/tpu_inference/layers/vllm/custom_ops/experimental/deepseek_v41/deepseek_v41_compressor.py
+index a8dbb402..303bd2aa 100644
+--- a/tpu_inference/layers/vllm/custom_ops/experimental/deepseek_v41/deepseek_v41_compressor.py
++++ b/tpu_inference/layers/vllm/custom_ops/experimental/deepseek_v41/deepseek_v41_compressor.py
+@@ -100,6 +100,21 @@ def _token_request_ids(query_start_loc: jax.Array,
+             1).astype(jnp.int32)
+ 
+ 
++def _real_tokens(query_start_loc: jax.Array, request_ids: jax.Array,
++                 num_tokens: int) -> jax.Array:
++    """Which packed rows hold a token of a real request.
++
++    The runner pads the token axis up to a compiled bucket. A padding row
++    inherits the last request's id, and its position is whatever the padding
++    buffer holds. Every scatter in this module must mask on this array, or a
++    padding row overwrites a live cache slot. The CUDA kernels get the same
++    protection from a ``slot_mapping`` of -1, which the TPU metadata does not
++    carry.
++    """
++    tokens = jnp.arange(num_tokens, dtype=jnp.int32)
++    return tokens < query_start_loc[request_ids + 1]
++
++
+ def _rms_norm(x: jax.Array, weight: jax.Array, eps: float) -> jax.Array:
+     """RMSNorm over the last axis, accumulated in float32.
+ 
+@@ -146,6 +161,107 @@ def _paged_slots(block_tables: jax.Array, request_ids: jax.Array,
+     return blocks[request_ids, page] * page_size + row_indices % page_size
+ 
+ 
++def pool_ratio_two(
++    kv_score: jax.Array,
++    positions: jax.Array,
++    query_start_loc: jax.Array,
++    block_tables: jax.Array,
++    ring: jax.Array,
++    weight: jax.Array,
++    head_dim: int,
++    eps: float,
++) -> tuple[jax.Array, jax.Array]:
++    """Pool each closed pair of rows with the gate, then refill the ring.
++
++    A group is the token pair that ends at an odd position. The first token of
++    a chunk pools against a row the previous chunk left in the ring, so the
++    ring is read before it is written. JAX makes that ordering explicit: the
++    gather reads the array this call received and the scatter produces a new
++    one.
++
++    This is a pure function of its arguments so a test can drive it with
++    handmade metadata. The layer calls it inside a ``shard_map``.
++
++    Returns the BF16 latent of every row, and the new ring. A row that does not
++    close a group holds a value that no consumer reads.
++    """
++    num_tokens = kv_score.shape[0]
++    num_requests = query_start_loc.shape[0] - 1
++    capacity = ring.shape[1]
++    tokens = jnp.arange(num_tokens, dtype=jnp.int32)
++    request_ids = _token_request_ids(query_start_loc, num_tokens)
++    positions = positions.astype(jnp.int32)
++    kv_score = kv_score.astype(jnp.float32)
++
++    # The ring row of the token before this one, in this token's own request.
++    # Only a chunk's first token reads it.
++    ring_slots = _paged_slots(block_tables, request_ids,
++                              (positions - 1) % capacity, num_requests,
++                              capacity)
++    previous_ring = ring.reshape(-1, ring.shape[-1])[ring_slots]
++
++    # The row before this one inside the chunk. Row 0 has none, and the
++    # chunk-start test below discards it.
++    previous_chunk = jnp.roll(kv_score, 1, axis=0)
++    is_chunk_start = tokens == query_start_loc[request_ids]
++    previous = jnp.where(is_chunk_start[:, None], previous_ring,
++                         previous_chunk)
++
++    pair = jnp.stack([previous, kv_score], axis=0)
++    gate = jax.nn.softmax(pair[:, :, head_dim:], axis=0)
++    pooled = jnp.sum(pair[:, :, :head_dim] * gate, axis=0)
++    latent = _rms_norm(pooled, weight, eps).astype(jnp.bfloat16)
++
++    # Refill the ring with the chunk's last ``capacity`` rows. The bound is not
++    # an optimization. The stored rows hold consecutive positions and number at
++    # most ``capacity``, so their ``positions % capacity`` values are distinct
++    # and each ring slot takes one write. A wider window would send two rows to
++    # one slot, and a scatter with a repeated index has no defined winner.
++    chunk_end = query_start_loc[request_ids + 1]
++    store = (chunk_end - tokens) <= capacity
++    store &= _real_tokens(query_start_loc, request_ids, num_tokens)
++    store_slots = _paged_slots(block_tables, request_ids, positions % capacity,
++                               num_requests, capacity)
++    flat_ring = ring.reshape(-1, ring.shape[-1])
++    # One row past the end absorbs the masked-out writes.
++    store_slots = jnp.where(store, store_slots, flat_ring.shape[0])
++    flat_ring = jnp.concatenate(
++        [flat_ring, jnp.zeros((1, flat_ring.shape[1]), flat_ring.dtype)],
++        axis=0)
++    flat_ring = flat_ring.at[store_slots].set(kv_score.astype(flat_ring.dtype))
++    return latent, flat_ring[:-1].reshape(ring.shape)
++
++
++def build_kv_records(
++    latent: jax.Array,
++    positions: jax.Array,
++    cos_sin_cache: jax.Array,
++    ratio: int,
++    nope_record_bytes: int,
++) -> tuple[jax.Array, jax.Array]:
++    """Rotate a latent and pack it into the NoPE and RoPE cache records.
++
++    A latent stands for its whole group, so it rotates at the position of the
++    group's first token. The NoPE record holds 448 FP8 E4M3 bytes then 7 E8M0
++    scale bytes, zero-padded to the record width. The RoPE record holds the 64
++    rotary channels in BF16.
++
++    This is a pure function of its arguments so a test can compare it against
++    the CUDA kernel without a mesh.
++    """
++    rotated = _gptj_rope(latent.astype(jnp.float32),
++                         positions.astype(jnp.int32) // ratio * ratio,
++                         cos_sin_cache)
++    values, scales = quantize_e8m0(rotated[:, :NOPE_CHANNELS], QUANT_BLOCK)
++    nope_record = jnp.zeros((latent.shape[0], nope_record_bytes), jnp.uint8)
++    nope_record = nope_record.at[:, :NOPE_CHANNELS].set(values)
++    nope_record = nope_record.at[:, NOPE_CHANNELS:NOPE_CHANNELS +
++                                 scales.shape[1]].set(scales)
++    rope_record = rotated[:, NOPE_CHANNELS:].astype(jnp.bfloat16).view(
++        jnp.uint8)
++    return nope_record, rope_record
++
++
+ class VllmDeepseekV41CompressorStateCache(CompressorStateCache):
+     """TPU-compatible compressor state cache.
+ 
+@@ -274,50 +390,8 @@ class VllmDeepseekV41Compressor(DeepseekCompressor):
+ 
+         def _pool(kv_score, positions, query_start_loc, block_tables, ring,
+                   weight):
+-            num_tokens = kv_score.shape[0]
+-            num_requests = query_start_loc.shape[0] - 1
+-            capacity = ring.shape[1]
+-            tokens = jnp.arange(num_tokens, dtype=jnp.int32)
+-            request_ids = _token_request_ids(query_start_loc, num_tokens)
+-            positions = positions.astype(jnp.int32)
+-
+-            # The ring row of the token before this one, in this token's own
+-            # request. Only a chunk's first token reads it.
+-            ring_slots = _paged_slots(block_tables, request_ids,
+-                                      (positions - 1) % capacity, num_requests,
+-                                      capacity)
+-            previous_ring = ring.reshape(-1, ring.shape[-1])[ring_slots]
+-
+-            # The row before this one inside the chunk. Row 0 has none, and
+-            # the chunk-start test below discards it.
+-            previous_chunk = jnp.roll(kv_score, 1, axis=0)
+-            is_chunk_start = tokens == query_start_loc[request_ids]
+-            previous = jnp.where(is_chunk_start[:, None], previous_ring,
+-                                 previous_chunk)
+-
+-            pair = jnp.stack([previous, kv_score.astype(jnp.float32)], axis=0)
+-            gate = jax.nn.softmax(pair[:, :, head_dim:], axis=0)
+-            pooled = jnp.sum(pair[:, :, :head_dim] * gate, axis=0)
+-            latent = _rms_norm(pooled, weight, eps).astype(jnp.bfloat16)
+-
+-            # Refill the ring with the chunk's last ``capacity`` rows. Any
+-            # earlier row is already consumed, and writing it would give two
+-            # tokens the same ring slot.
+-            chunk_end = query_start_loc[request_ids + 1]
+-            store = (chunk_end - tokens) <= capacity
+-            store_slots = _paged_slots(block_tables, request_ids,
+-                                       positions % capacity, num_requests,
+-                                       capacity)
+-            flat_ring = ring.reshape(-1, ring.shape[-1])
+-            # One row past the end absorbs the masked-out writes.
+-            store_slots = jnp.where(store, store_slots, flat_ring.shape[0])
+-            flat_ring = jnp.concatenate(
+-                [flat_ring,
+-                 jnp.zeros((1, flat_ring.shape[1]), flat_ring.dtype)],
+-                axis=0)
+-            flat_ring = flat_ring.at[store_slots].set(
+-                kv_score.astype(flat_ring.dtype))
+-            return latent, flat_ring[:-1].reshape(ring.shape)
++            return pool_ratio_two(kv_score, positions, query_start_loc,
++                                  block_tables, ring, weight, head_dim, eps)
+ 
+         latent, updated_ring = jax.shard_map(
+             _pool,
+@@ -376,22 +450,13 @@ class VllmDeepseekV41Compressor(DeepseekCompressor):
+             positions = positions.astype(jnp.int32)
+             request_ids = _token_request_ids(query_start_loc, num_tokens)
+ 
+-            # A latent stands for its whole group, so it rotates at the
+-            # position of the group's first token.
+-            rotated = _gptj_rope(latent.astype(jnp.float32),
+-                                 positions // ratio * ratio, cos_sin_cache)
+-            values, scales = quantize_e8m0(rotated[:, :NOPE_CHANNELS],
+-                                           QUANT_BLOCK)
+-
+-            nope_record = jnp.zeros((num_tokens, nope_cache.shape[-1]),
+-                                    jnp.uint8)
+-            nope_record = nope_record.at[:, :NOPE_CHANNELS].set(values)
+-            nope_record = nope_record.at[:, NOPE_CHANNELS:NOPE_CHANNELS +
+-                                         scales.shape[1]].set(scales)
+-            rope_record = rotated[:, NOPE_CHANNELS:].astype(
+-                jnp.bfloat16).view(jnp.uint8)
++            nope_record, rope_record = build_kv_records(
++                latent, positions, cos_sin_cache, ratio,
++                nope_cache.shape[-1])
+ 
+             closes_group = (positions + 1) % ratio == 0
++            closes_group &= _real_tokens(query_start_loc, request_ids,
++                                         num_tokens)
+             states = positions // ratio
+ 
+             def _scatter(cache, record):
+diff --git a/tpu_inference/layers/vllm/custom_ops/experimental/deepseek_v41/deepseek_v41_indexer.py b/tpu_inference/layers/vllm/custom_ops/experimental/deepseek_v41/deepseek_v41_indexer.py
+index b097b4db..e174e554 100644
+--- a/tpu_inference/layers/vllm/custom_ops/experimental/deepseek_v41/deepseek_v41_indexer.py
++++ b/tpu_inference/layers/vllm/custom_ops/experimental/deepseek_v41/deepseek_v41_indexer.py
+@@ -44,7 +44,8 @@ from tpu_inference.kernels.experimental.deepseek_v4.indexer.streamindex_topk imp
+ from tpu_inference.kernels.experimental.deepseek_v4.rope import rope_quant
+ from tpu_inference.layers.common.sharding import ShardingAxisName
+ from tpu_inference.layers.vllm.custom_ops.experimental.deepseek_v41.deepseek_v41_compressor import (
+-    _gptj_rope, _paged_slots, _rms_norm, _token_request_ids, quantize_e8m0)
++    _gptj_rope, _paged_slots, _real_tokens, _rms_norm, _token_request_ids,
++    quantize_e8m0)
+ from tpu_inference.logger import init_logger
+ from tpu_inference.models.vllm.vllm_model_wrapper_context import \
+     get_vllm_model_wrapper_context
+@@ -188,6 +189,8 @@ class VllmDeepseekV41Indexer(DeepseekV4Indexer):
+             slots = _paged_slots(block_tables, request_ids, positions // ratio,
+                                  num_requests, page_size)
+             closes_group = (positions + 1) % ratio == 0
++            closes_group &= _real_tokens(query_start_loc, request_ids,
++                                         num_tokens)
+             slots = jnp.where(closes_group, slots, flat.shape[0])
+             flat = jnp.concatenate(
+                 [flat, jnp.zeros((1, flat.shape[1]), flat.dtype)], axis=0)

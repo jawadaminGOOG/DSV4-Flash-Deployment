@@ -108,12 +108,12 @@ spec:
           hostPath:
             path: /var/tmp/dsv41-jax-cache
             type: DirectoryOrCreate
-        - name: stagedir
-          configMap:
-            name: dsv41-stage
       containers:
         - name: worker
-          image: asia-northeast1-docker.pkg.dev/northam-ce-mlai-tpu/jawadamin-dsv4/tpu-inference:0187efa-int8
+          # Build this image from the patched trees. `patches/README.md` names
+          # the two base commits, lists the ten patches, and gives the build
+          # command. A stock tpu-inference image cannot run this model.
+          image: <YOUR_REGISTRY>/tpu-inference:v41
           imagePullPolicy: IfNotPresent
           resources:
             limits:
@@ -129,9 +129,6 @@ spec:
               mountPath: /dev/shm
             - name: jaxcache
               mountPath: /jaxcache
-            - name: stagedir
-              mountPath: /stage
-              readOnly: true
           ports:
             - containerPort: 6379
             - containerPort: 8000
@@ -233,8 +230,6 @@ spec:
             # loader builds in host memory before it shards to the chips.
             - name: RUNAI_STREAMER_HOST_LOCK_BYTES
               value: "40000000000"
-            - name: STACK_ROOT
-              value: /workspace/v41stack
             - name: TPU_WORKER_HOSTNAMES
               value: dsv41-v6e16-0.dsv41-v6e16,dsv41-v6e16-1.dsv41-v6e16,dsv41-v6e16-2.dsv41-v6e16,dsv41-v6e16-3.dsv41-v6e16
             - name: TPU_WORKER_ID
@@ -254,13 +249,6 @@ spec:
             - |
               set -euo pipefail
 
-              # Leave the image's working directory, `/workspace/tpu_inference`.
-              # Python puts the current directory first on `sys.path`, ahead of
-              # every `PYTHONPATH` entry, and that directory holds a
-              # `tpu_inference` package. A process started there imports the
-              # image's tpu-inference and silently ignores the staged stack.
-              cd /
-
               IDX="${JOB_COMPLETION_INDEX:?}"
               echo "[$(date -Is)] index=${IDX} head=${HEAD_HOST}"
 
@@ -274,70 +262,48 @@ spec:
                 sleep 2
               done
 
-              # The image cannot import the V4.1 model. It ships an older vLLM
-              # whose `deepseek_v4_1` package is missing three symbols, an
-              # older tpu-inference that breaks against the newer vLLM, and
-              # none of the five leaf packages. The stager puts working copies
-              # of all three ahead of the image's on PYTHONPATH. It rewrites
-              # no file the image owns, so the image needs no rebuild.
-              echo "[$(date -Is)] staging the V4.1 stack"
-              python3 /stage/stage_v41_stack.py --root "${STACK_ROOT}"
-              PYTHONPATH="$(python3 /stage/stage_v41_stack.py \
-                --root "${STACK_ROOT}" --print-path)"
-              export PYTHONPATH
-              echo "[$(date -Is)] PYTHONPATH=${PYTHONPATH}"
-
-              # Name the fork build in the log. A stale tarball is otherwise
-              # invisible until a fixed bug reappears.
-              echo -n "[$(date -Is)] fork head: "
-              cat "${STACK_ROOT}/forkpath/tpu_inference/FORK_HEAD" || echo "(none)"
-
-              # Prove the overlay won before the server spends 20 minutes
-              # loading weights. Without this the image's own packages import
-              # cleanly and the run fails much later, with a confusing error.
-              python3 -c "
-              import sys, tpu_inference, vllm
-              root = '${STACK_ROOT}'
-              for module in (vllm, tpu_inference):
-                  if not module.__file__.startswith(root):
-                      sys.exit(f'{module.__name__} resolved to {module.__file__}, '
-                               f'which is not under {root}')
-              print(f'stack in use: {vllm.__file__} {tpu_inference.__file__}')
-              "
-
-              # Prove the staged engram carries the TPU path too. The overlay
-              # check above only proves the directory won, not that the file in
-              # it is the patched one, and a stale tarball fails 20 minutes
-              # later with `Engram CPU offload requires UVA support`.
+              # Prove the image carries all ten patches before the server
+              # spends 20 minutes loading weights. A stock image imports
+              # cleanly and then fails much later with an unrelated error, so
+              # this check saves a long cycle. See `patches/README.md`.
               python3 -c "
               import sys
               from vllm.models.deepseek_v4_1.common import engram
               from vllm.model_executor.model_loader import weight_utils
-              for name in ('_lookup_reference',):
-                  if not hasattr(engram.ParallelEngramEmbedding, name):
-                      sys.exit(f'staged engram has no {name}; the tarball is stale')
+
+              missing = []
+              # vLLM patch 0001: the Engram lookup needs a non-CUDA path.
+              if not hasattr(engram.ParallelEngramEmbedding, '_lookup_reference'):
+                  missing.append('engram._lookup_reference')
               for name in ('_fused_engram_post_wkv_reference', '_hash_ids_reference'):
                   if not hasattr(engram, name):
-                      sys.exit(f'staged engram has no {name}; the tarball is stale')
+                      missing.append(f'engram.{name}')
+              # vLLM patch 0002: one RunAI streamer host buffer for each node.
               if not hasattr(weight_utils, '_runai_host_lock'):
-                  sys.exit('staged weight_utils has no host lock; the tarball is stale')
+                  missing.append('weight_utils._runai_host_lock')
+              # tpu-inference patch 0005: host tensors stay on the host.
               from tpu_inference.layers.vllm.process_weights import cleanup_sharding
               if not hasattr(cleanup_sharding, '_drop_host_resident'):
-                  sys.exit('staged cleanup_sharding still sweeps host tensors to the '
-                           'device; the tarball is stale')
-              # V4 and V4.1 each define a class named DeepseekV4IndexerCache, so an
-              # isinstance check against the V4 one alone misses every V4.1 layer.
+                  missing.append('cleanup_sharding._drop_host_resident')
+              # tpu-inference patch 0003: V4 and V4.1 each define a class named
+              # DeepseekV4IndexerCache, so a check against the V4 one alone
+              # misses every V4.1 layer.
               from tpu_inference.runner import kv_cache_manager
               from vllm.models.deepseek_v4_1.attention import DeepseekV4IndexerCache
-              if not kv_cache_manager.is_cache_for_ds_v4.__module__:
-                  sys.exit('unexpected kv_cache_manager')
               if DeepseekV4IndexerCache not in (
                       kv_cache_manager.DeepseekV4IndexerCache,
                       getattr(kv_cache_manager, 'DeepseekV41IndexerCache', None)):
-                  sys.exit('kv_cache_manager does not know the V4.1 indexer cache; '
-                           'the tarball is stale')
-              print('engram TPU path, streamer host lock, host-tensor skip and '
-                    'V4.1 indexer cache present')
+                  missing.append('kv_cache_manager V4.1 indexer cache')
+              # tpu-inference patch 0002: the model must reach the registry.
+              from tpu_inference.models.vllm.experimental import _TPU_VLLM_MODELS
+              if 'DeepseekV41ForCausalLM' not in _TPU_VLLM_MODELS:
+                  missing.append('registry DeepseekV41ForCausalLM')
+
+              if missing:
+                  sys.exit('this image is not fully patched; missing: '
+                           + ', '.join(missing)
+                           + '. Rebuild it as patches/README.md describes.')
+              print('all ten patches present')
               "
 
               if [ "${IDX}" = "0" ]; then

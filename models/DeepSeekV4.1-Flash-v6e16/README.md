@@ -38,9 +38,9 @@ before the model produced correct tokens at all. The kernel section below gives 
 | Sequence ceiling | 256 |
 | Memory cap | `--gpu-memory-utilization 0.80` |
 
-The full manifest is [`dsv41-flash-v6e16-serving.yaml`](dsv41-flash-v6e16-serving.yaml). It stages
-the model code through a `PYTHONPATH` overlay, built from a ConfigMap before the server starts. The
-serving command it runs is:
+The full manifest is [`dsv41-flash-v6e16-serving.yaml`](dsv41-flash-v6e16-serving.yaml). It runs a
+patched image, built as [`patches/README.md`](patches/README.md) describes, and it checks that all
+ten patches are present before the server loads any weight. The serving command it runs is:
 
 ```bash
 vllm serve "${MODEL_URI}" \
@@ -64,6 +64,12 @@ vllm serve "${MODEL_URI}" \
 The model runs on a new TPU backend, about 4,200 lines across 23 files. No file of the
 DeepSeek-V4 path changes, so the V4 recipe in
 [`models/DeepSeekV4-Flash-v6e16/`](../DeepSeekV4-Flash-v6e16) still runs unmodified.
+
+**Every change is in [`patches/`](patches/) as an applyable patch**: eight against tpu-inference
+and two against vLLM, each verified to apply to a named base commit.
+[`patches/README.md`](patches/README.md) describes each one, and
+[`patches/apply.sh`](patches/apply.sh) clones both repositories and applies the whole set. The
+four subsections below summarise the work; the patches are the authority.
 
 ### 1. The compressed rotary record is two byte planes, not interleaved bf16
 
@@ -243,7 +249,9 @@ even when the model is healthy.
 
 | File | Purpose |
 |---|---|
-| [`dsv41-flash-v6e16-serving.yaml`](dsv41-flash-v6e16-serving.yaml) | Multi-host serving Job, headless Service, and the model-code overlay as a ConfigMap |
+| [`patches/`](patches/) | The ten patches that make the model run, and the script that applies them |
+| [`patches/README.md`](patches/README.md) | What each patch does, its base commit, and the build command |
+| [`dsv41-flash-v6e16-serving.yaml`](dsv41-flash-v6e16-serving.yaml) | Multi-host serving Job, headless Service, ServiceAccount, and the patched-image guard |
 | [`scripts/benchmark_sweep.py`](scripts/benchmark_sweep.py) | The sweep client: three shapes, ten concurrency levels, one JSON row per point |
 | [`scripts/greedy_determinism.py`](scripts/greedy_determinism.py) | Greedy determinism over 200 prompts, half prose and half synthetic slot prompts |
 | [`scripts/smoke.py`](scripts/smoke.py) | Four known-answer questions on the chat endpoint, run first after any restart |
@@ -254,21 +262,28 @@ even when the model is healthy.
 ## Reproduce
 
 ```bash
-# 1. Deploy. Substitute your registry, bucket and service account first.
+# 1. Apply the ten patches and build one image from the patched trees.
+#    A stock tpu-inference image cannot run this model.
+./patches/apply.sh /tmp/v41
+cd /tmp/v41 && docker build -t <YOUR_REGISTRY>/tpu-inference:v41 \
+  -f tpu-inference/docker/Dockerfile . && docker push <YOUR_REGISTRY>/tpu-inference:v41
+cd -
+
+# 2. Deploy. Substitute your registry, bucket and service account first.
 kubectl apply -f dsv41-flash-v6e16-serving.yaml
 kubectl logs -f job/dsv41-v6e16 | grep "Application startup complete"
 
-# 2. Check correctness before measuring anything.
+# 3. Check correctness before measuring anything.
 POD=$(kubectl get pods -l app=dsv41-v6e16 -o name | head -1 | cut -d/ -f2)
 kubectl cp scripts/smoke.py "${POD}:/tmp/smoke.py"
 kubectl exec "${POD}" -- python3 /tmp/smoke.py
 
-# 3. Run the balanced sweep from inside the serving pod.
+# 4. Run the balanced sweep from inside the serving pod.
 kubectl cp scripts/benchmark_sweep.py "${POD}:/tmp/benchmark_sweep.py"
 kubectl exec "${POD}" -- python3 /tmp/benchmark_sweep.py 1k1k /tmp/1k1k.json
 kubectl cp "${POD}:/tmp/1k1k.json" results/raw/1k1k.json
 
-# 4. Rebuild the chart.
+# 5. Rebuild the chart.
 gnuplot -e "outfile='results/charts/v41-vs-v4-1k1k.png'" scripts/plot_sweep.gp
 ```
 
