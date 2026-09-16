@@ -6,7 +6,8 @@ The stock serving image cannot run this model. Ten patches make it run: eight ag
 directory above serves the model.
 
 Each patch states its own base commit, and every patch in this directory is verified to apply to
-that base.
+that base. `apply.sh` was run against fresh clones, and the tpu-inference tree it produced is
+identical to the development tree the benchmarks ran on — `git diff` between the two is empty.
 
 ## Base commits
 
