@@ -89,6 +89,21 @@ spec:
             sizeLimit: 16Gi
         # A separate cache path from the V4 job. The two models compile
         # different programs, and one shared directory only adds misses.
+        #
+        # CAUTION: this cache grows to about 42 GiB for each model, and it
+        # never prunes itself. A node that also holds another model's cache
+        # can run out of ephemeral storage. The kubelet then evicts every pod
+        # with "The node was low on resource: ephemeral-storage", and the Job
+        # fails with BackoffLimitExceeded. Do one of these before you serve a
+        # second model from the same node pool:
+        #   1. Delete the other model's cache directory.
+        #   2. Point JAX at a bucket instead of the node. Delete this volume,
+        #      delete the /jaxcache volumeMount, and set
+        #      JAX_COMPILATION_CACHE_DIR to gs://<YOUR_BUCKET>/jaxcache. The
+        #      image already holds gcsfs, etils and tensorstore, and the
+        #      service account below already reads the bucket. A bucket cache
+        #      is also shared by all four nodes, so only one node pays for
+        #      each compile.
         - name: jaxcache
           hostPath:
             path: /var/tmp/dsv41-jax-cache

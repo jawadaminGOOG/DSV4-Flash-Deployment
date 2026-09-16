@@ -132,6 +132,21 @@ The weights take 378.78 GiB of the 499.84 GiB slice. Everything below follows fr
 - **111.76 GiB of the resident weights is 16-way replication of every non-expert weight.** Removing
   it is the largest available lever and it needs a sharding change, not a flag.
 
+### One node-disk ceiling as well
+
+A cold compile of this model takes about 87 minutes, so the persistent JAX compile cache is worth
+keeping. The cache grows to about 42 GiB for each model and it never prunes itself.
+
+CAUTION: do not run a second model from the same node pool with a second `hostPath` cache. Two
+caches on one node exhaust the ephemeral storage. The kubelet then evicts every serving pod with
+`The node was low on resource: ephemeral-storage`, and the Job ends with `BackoffLimitExceeded`.
+The eviction looks like a model failure in the pod log, and it is not one.
+
+Point the cache at a bucket to remove the ceiling. Delete the `jaxcache` volume and its mount, then
+set `JAX_COMPILATION_CACHE_DIR` to `gs://<YOUR_BUCKET>/jaxcache`. The image already holds `gcsfs`,
+`etils` and `tensorstore`, and the service account already reads the bucket. All four nodes then
+share one cache, so only one node pays for each compile.
+
 ## Benchmark results (concurrency sweep 1 → 512)
 
 Balanced `1k/1k`, measured with a streaming client running inside the serving pod, at
