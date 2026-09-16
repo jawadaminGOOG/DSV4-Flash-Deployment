@@ -17,10 +17,11 @@ before the model produced correct tokens at all. The kernel section below gives 
   to end for V4-Flash. The end-to-end gap is prefill, and the prefill batch size is 8× smaller on
   this arm for a memory reason given below.
 - **Zero failed requests.** 1,028 requests across ten concurrency levels, from 1 to 512.
-- **Greedy decoding is deterministic.** 40 prompts, three passes at concurrency 1, 40/40
-  byte-identical. 100 synthetic key-value-slot prompts at concurrency 16, 100/100 identical.
 - **The weights need 378.78 GiB of the 499.84 GiB slice.** 111.76 GiB of that is 16-way
   replication of every non-expert weight. That number sets every other limit in this recipe.
+- **CAUTION: this page publishes throughput, not output quality.** Long greedy generations on this
+  deployment do not terminate. Read [Correctness](#correctness-what-is-checked-and-what-is-not)
+  before you serve it to anyone.
 
 ## Configuration
 
@@ -158,6 +159,12 @@ share one cache, so only one node pays for each compile.
 Balanced `1k/1k`, measured with a streaming client running inside the serving pod, at
 `temperature 0` with `ignore_eos`. Every level from 1 to 512 is measured, not interpolated.
 
+`ignore_eos` sets the scope of this table. Every request emits exactly 1,024 tokens, and the
+prompts are synthetic word cycles, so the numbers measure prefill and decode cost on this hardware
+and nothing else. They do not depend on what the model decides to say, and the termination problem
+described under [Correctness](#correctness-what-is-checked-and-what-is-not) cannot change them.
+A token costs the same arithmetic whether or not it is a useful token.
+
 ![V4.1 against V4, 1k/1k](results/charts/v41-vs-v4-1k1k.png)
 
 | Concurrency | Output tok/s | tok/s per chip | TTFT p50 | TTFT p90 | TPOT | Success |
@@ -174,7 +181,13 @@ Balanced `1k/1k`, measured with a streaming client running inside the serving po
 | 512 | **5,137.30** | **321.08** | 19,811 ms | 34,300 ms | 77.31 ms | 512/512 |
 
 **The 12,000 ms TTFT at concurrency 1 is the sampler compile on the first request.** The same
-request shape at concurrency 2 returns its first token in 1,126 ms.
+request shape at concurrency 2 returns its first token in 1,126 ms. A later run on an already-warm
+server returns the first token in 1,317 ms at concurrency 1, which confirms the compile reading.
+
+**The curve reproduces.** A second run of the same sweep, on a later build serving a 16,384-token
+context instead of 2,048, gave the same shape and 512/512 success at every level: 19.2 tok/s at
+concurrency 1, 1,538.2 at 64, and 4,844.6 at 512. The 16,384-token arm is 3% to 6% slower above
+concurrency 4, so raise the context limit only as far as you need it.
 
 ### Against DeepSeek-V4-Flash on the same slice
 
@@ -209,15 +222,36 @@ The V4-Flash figures come from
 [`models/DeepSeekV4-Flash-v6e16/`](../DeepSeekV4-Flash-v6e16), measured on this same slice with
 this same client.
 
-## Correctness
+## Correctness: what is checked, and what is not
 
-| Check | Result |
-|---|---|
-| Greedy determinism, concurrency 1, 40 prompts, three passes | **40/40 byte-identical** |
-| Greedy determinism, concurrency 16, synthetic slot prompts | **100/100 identical** |
-| Greedy determinism, concurrency 16, prose prompts | 85/100 identical |
-| Empty completions | 0 |
-| Request errors | 0 |
+**CAUTION: long greedy generations on this deployment do not terminate.** With a 14,336-token cap
+and `temperature 0.0`, 197 of 197 completed requests stopped on `length` and none on `stop`. Every
+one produced exactly 14,336 tokens, and the tails are degenerate repetition, such as
+`') 10^\n) 10^\n) 10^'`. The same behaviour appears at a 1,536-token cap, so it is non-termination
+and not a context limit. Serve this model with a non-zero temperature until the cause is known.
+
+The cause is open between two candidates, and this page will not assign one before the separating
+experiment runs. The first is the sampling setting: these runs used `temperature 0.0` with no
+repetition penalty, and greedy decoding is a known cause of repetition loops in this model family,
+which DeepSeek ships with a recommended temperature near 0.6. The second is a defect in this port
+that needs more than about 512 output tokens to appear. The experiment that separates them is the
+same prompt set at `temperature 0.6` on the same deployment.
+
+The checks below all pass, and none of them would have caught the problem above:
+
+| Check | Output length | Result |
+|---|---|---|
+| Known-answer smoke questions, chat endpoint | ≤ 512 tokens | **4/4 correct** |
+| Greedy determinism, concurrency 1, 40 prompts, three passes | 128 tokens | **40/40 byte-identical** |
+| Greedy determinism, concurrency 16, synthetic slot prompts | 128 tokens | **100/100 identical** |
+| Greedy determinism, concurrency 16, prose prompts | 128 tokens | 85/100 identical |
+| Empty completions | — | 0 |
+| Request errors | — | 0 |
+
+**Determinism is not correctness, and the distinction matters here.** A model that repeats one
+token forever is perfectly deterministic. Every determinism result on this page is therefore
+consistent with the degeneration above, which is exactly why they did not detect it. Read them as
+what they are: evidence that the kernels are reproducible, not evidence that the output is right.
 
 The concurrency-1 result is the noise floor, and it shows the kernels themselves are deterministic.
 
@@ -239,11 +273,15 @@ even when the model is healthy.
 
 1. **Only the `1k/1k` shape is measured.** The `8k/1k` and `1k/8k` shapes need a 9,216-token
    context, which this arm does not serve.
-2. **No published benchmark score.** GPQA Diamond needs a long chain of thought, and a 2,048-token
-   context truncates every question in the set.
+2. **No accuracy score, and none can be measured until the termination problem is fixed.** GPQA
+   Diamond needs a long chain of thought. Every attempt ran to the token cap instead of finishing,
+   so the score would measure the degeneration and not the model. No figure is quoted for that
+   reason.
 3. **No cross-backend agreement test.** This project has no NVIDIA GPU, so the strongest
    correctness check — the same prompts on the TPU port and on the merged NVIDIA path, compared
    token for token — could not run.
+4. **Nothing here establishes output quality at any length above 512 tokens.** The longest
+   generation this page can vouch for is the 512-token smoke set.
 
 ## Files
 

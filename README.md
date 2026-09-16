@@ -28,8 +28,10 @@ active parameters, 384 routed experts) on the same 16-chip slice, in
 * **8,140 tok/s of steady-state decode** at $C=512$, which is near parity with V4-Flash. The
   end-to-end gap is prefill.
 * **100% request success rate** — 1,028 requests across ten concurrency levels.
-* Greedy decoding is deterministic: 40/40 byte-identical over three passes at $C=1$, and 100/100
-  identical on synthetic key-value-slot prompts at $C=16$.
+* **CAUTION: those are throughput figures only.** The sweep runs with `ignore_eos`, so it measures
+  hardware cost at a fixed 1,024 output tokens. Long greedy generations on this deployment do not
+  terminate, and no accuracy score is published for that reason. The model README gives the
+  evidence and the open question.
 
 V4.1-Flash had no TPU path before this work. It needs a new backend of about 4,200 lines: the
 decoder backbone, CSA2 attention, the compressor, the indexer, a 55-array key-value cache layout
@@ -258,7 +260,8 @@ Find all deployment manifests and benchmark scripts in the [`recipes/`](./recipe
     │   └── results/                       # Report, PNG charts and every raw measurement
     └── DeepSeekV4.1-Flash-v6e16/
         ├── README.md                      # Serving recipe, kernel work, and the 1k/1k sweep
-        ├── dsv41-flash-v6e16-serving.yaml # Serving Job, Service and model-code ConfigMap
+        ├── dsv41-flash-v6e16-serving.yaml # Serving Job, Service and the patched-image guard
+        ├── patches/                       # The ten patches that make the model run, and apply.sh
         ├── scripts/                       # Sweep, smoke, determinism and GPQA clients
         └── results/                       # Chart and every raw measurement
 ```
