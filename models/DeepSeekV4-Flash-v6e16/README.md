@@ -149,6 +149,6 @@ about 10 minutes.
 
 ## Related
 
-- The repository [`README.md`](../../README.md) covers the hardware reference, the cost model, and
-  the serving architecture in more depth.
+- [`models/DeepSeekV4.1-Flash-v6e16/`](../DeepSeekV4.1-Flash-v6e16/README.md) — DeepSeek-V4.1-Flash (`552B` total / `16B` active) recipe, 20-patch kernel queue, 3-shape concurrency sweeps, GPQA Diamond results, and [`results/xprof_kernel_report.md`](../DeepSeekV4.1-Flash-v6e16/results/xprof_kernel_report.md).
+- The repository [`README.md`](../../README.md) covers the side-by-side comparison of both models, the hardware reference, the cost model, and the kernel architecture in depth.
 - [`recipes/`](../../recipes) holds the original single-shape recipe and its benchmark client.

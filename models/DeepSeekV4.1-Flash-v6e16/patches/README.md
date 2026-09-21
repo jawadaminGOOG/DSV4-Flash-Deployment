@@ -1,39 +1,23 @@
-# Patches that make DeepSeek-V4.1-Flash run on TPU
+# Patches That Enable DeepSeek-V4.1-Flash on TPU v6e
 
-The stock serving image cannot run this model. Ten patches make it run: eight against
-[tpu-inference](https://github.com/vllm-project/tpu-inference) and two against
-[vLLM](https://github.com/vllm-project/vllm). Apply them, build one image, and the recipe in the
-directory above serves the model.
+The stock serving image cannot run `deepseek-ai/DeepSeek-V4.1-Flash`. Twenty patches enable full-context (`16,384`-token) serving, accuracy, and throughput on TPU v6e-16: **eighteen against [tpu-inference](https://github.com/vllm-project/tpu-inference)** (`0001..0018`) and **two against [vLLM](https://github.com/vllm-project/vllm)** (`0001..0002`).
 
-Each patch states its own base commit, and every patch in this directory is verified to apply to
-that base. `apply.sh` was run against fresh clones, and the tpu-inference tree it produced is
-identical to the development tree the benchmarks ran on — `git diff` between the two is empty.
+Every patch states its base commit and is verified to apply cleanly. Running `apply.sh` against fresh clones of `tpu-inference` (`f22b5068`) and `vllm` (`9b959b86`) produces a tree identical (`git diff` empty) to commit `d85ce9c1` on which the 3-workload concurrency sweeps, the 198-question GPQA Diamond evaluation, and the XProf profiles were measured.
 
-## Base commits
+## Base Commits
 
-| Repository | Base commit | Date | Apply with |
-|---|---|---|---|
-| `vllm-project/tpu-inference` | `f22b5068d9326e7899cd2fc8afd4de79f36d20f4` | 2026-09-09 | `git am` |
-| `vllm-project/vllm` | `9b959b86577c082c0b2bf9e2c22263255a36ad83` | 2026-09-10 | `git apply` |
+| Repository | Base Commit | Date | Patched Head | Apply Command |
+|---|---|---|---|---|
+| `vllm-project/tpu-inference` | `f22b5068d9326e7899cd2fc8afd4de79f36d20f4` | 2026-09-09 | `d85ce9c1` (`18` patches) | `git am` |
+| `vllm-project/vllm` | `9b959b86577c082c0b2bf9e2c22263255a36ad83` | 2026-09-10 | `2` patches | `git apply` |
 
-The vLLM base is the commit that first added the V4.1 model definitions
-(`[Model] DeepSeek-V4.1-Flash Model Definitions`).
-
-CAUTION: vLLM renamed the package from `deepseek_v4_1` to `deepseek_v41` on 2026-09-14 in
-`[Refactor] Normalize DeepSeek V4.1 model package`. The vLLM patches here name the old path. On a
-newer checkout, apply them with `git apply --directory` or rename the path in the patch header
-first.
-
-## Apply them
+## Apply Them
 
 ```bash
 ./apply.sh /path/to/workdir
 ```
 
-The script clones both repositories at the base commits, applies every patch in order, and stops
-on the first failure. Read it before you run it; it is 30 lines.
-
-To do it by hand:
+Or manually:
 
 ```bash
 git clone https://github.com/vllm-project/tpu-inference.git
@@ -45,108 +29,34 @@ git -C vllm checkout 9b959b86577c082c0b2bf9e2c22263255a36ad83
 for p in /path/to/patches/vllm/*.patch; do git -C vllm apply "$p"; done
 ```
 
-## What the tpu-inference patches do
+---
 
-`tpu-inference/`, 23 files, 4,181 insertions, 35 deletions.
+## What the 18 `tpu-inference` Patches Do
 
-### 0001 — Claim every DeepSeek V4 family model type for `deepseek_v4_fp8`
+### Foundations, Quantization, Backbone & Memory Layout (`0001`–`0008`)
 
-The quantisation config matched the model type `deepseek_v4` exactly, so `deepseek_v4_1` fell
-through to the dense path and the checkpoint failed to load. The patch matches the whole family.
-It ships a unit test.
+- **[`0001-Quantization-Claim-every-DeepSeek-V4-family-model-ty.patch`](tpu-inference/0001-Quantization-Claim-every-DeepSeek-V4-family-model-ty.patch)** — Widens `VllmDeepseekV4Fp8Config.override_quantization_method` so `deepseek_v41` and `deepseek_v41_text` route through `deepseek_v4_fp8` instead of falling through to unquantized dense linear layers. Includes a 10-case unit test.
+- **[`0002-Add-the-DeepSeek-V4.1-backbone-for-TPU.patch`](tpu-inference/0002-Add-the-DeepSeek-V4.1-backbone-for-TPU.patch)** — Adds `tpu_inference/models/vllm/experimental/deepseek_v41.py`: 40-layer decoder stack (`hidden_size=5120`, `384` routed experts, `head_dim=512`, `rms_norm_eps=1e-20`, 4-stream `mHC` hyper-connections).
+- **[`0003-Add-the-DeepSeek-V4.1-TPU-attention-compressor-and-i.patch`](tpu-inference/0003-Add-the-DeepSeek-V4.1-TPU-attention-compressor-and-i.patch)** — Adds `deepseek_v41_attention.py` (CSA2 sparse MLA + SWA), `deepseek_v41_compressor.py` (KV pooling across 4 compressor groups), `deepseek_v41_indexer.py` (top-512 index selection), and `kv_cache_manager.py` support for 55 KV/state arrays across 51 logical layers.
+- **[`0004-Mask-padding-rows-out-of-the-DeepSeek-V4.1-cache-wri.patch`](tpu-inference/0004-Mask-padding-rows-out-of-the-DeepSeek-V4.1-cache-wri.patch)** — Masks padded batch rows out of KV-cache scatter writes so short batches cannot overwrite slot 0. Includes a 295-line compressor unit test.
+- **[`0005-Give-every-V4.1-sliding-window-layer-its-own-KV-cach.patch`](tpu-inference/0005-Give-every-V4.1-sliding-window-layer-its-own-KV-cach.patch)** — Gives each of the 40 sliding-window attention layers its own KV array; adds native MXFP4 weight-only `gmm_v2` VMEM dequantization (`e2m1` + `e8m0` scale in compact `[E, num_blocks, N]` layout, saving `47.46 GiB` of HBM across the 16-chip slice); and adds `engram_host_lookup.py` + `_drop_host_resident` so the `94.42 GiB/rank` Engram embedding tables remain pinned in host DRAM.
+- **[`0006-Trace-the-compressed-cache-bytes-and-the-sliding-win.patch`](tpu-inference/0006-Trace-the-compressed-cache-bytes-and-the-sliding-win.patch)** — Optional env-gated diagnostic tracing for compressed KV cache bytes and SWA handoff.
+- **[`0007-Write-the-compressed-RoPE-record-in-the-byte-plane-l.patch`](tpu-inference/0007-Write-the-compressed-RoPE-record-in-the-byte-plane-l.patch)** — Writes the compressed RoPE record as two split byte planes (`high` byte at offset `i`, `low` byte at offset `64 + i`) matching the layout `csa_gather` decodes (`(high << 8) | low`).
+- **[`0008-Test-that-the-RoPE-record-decodes-the-way-the-gather.patch`](tpu-inference/0008-Test-that-the-RoPE-record-decodes-the-way-the-gather.patch)** — Round-trip regression test verifying the compressor byte-plane write against `csa_gather` decoding.
 
-### 0002 — Add the DeepSeek V4.1 backbone for TPU
+### Full-Context (`16K`) Correctness, Causal Bounds & Precision Fixes (`0009`–`0018`)
 
-The decoder: 40 layers, `hidden_size` 5120, 384 routed experts, `head_dim` 512, `rms_norm_eps`
-1e-20. `mhc_torch.py` holds the torch-side helper the wrapper calls.
+- **[`0009`](tpu-inference/0009-Trace-the-RMS-and-the-zero-fraction-beside-the-layer.patch)–[`0012`](tpu-inference/0012-Make-the-mHC-and-unfilled-parameter-reports-readable.patch)** — Layer-wise RMS/zero-fraction diagnostics and load-time verification of `mHC` stream-mixing weights and parameter initialization.
+- **[`0013-Fix-the-indexer-causal-bound-for-compressed-KV-state.patch`](tpu-inference/0013-Fix-the-indexer-causal-bound-for-compressed-KV-state.patch)** — Fixes the `streamindex_topk.py` Pallas causal mask bound from inclusive `k_span <= q_pos // compression_ratio` to the exact exclusive bound `k_span < (q_pos + 1) // compression_ratio` matching the DeepSeek reference (`model.py:561-565`), preventing odd query positions (`q_pos = 64`) from attending to partially-formed compressed KV slots.
+- **[`0014-Implement-short-context-indexer-bypass-matching-refe.patch`](tpu-inference/0014-Implement-short-context-indexer-bypass-matching-refe.patch)** — Aligns the short-context indexer bypass threshold (`max_seq_len < compressed_topk * compress_ratio`, i.e., `1,024` tokens for ratio-2 layers) with the reference vLLM implementation.
+- **[`0015-Import-lax-and-sort-streamindex_topk-outputs-chronol.patch`](tpu-inference/0015-Import-lax-and-sort-streamindex_topk-outputs-chronol.patch)** — Sorts `streamindex_topk` selected KV indices in chronological order before `csa_gather`.
+- **[`0016-core_attention-retain-float32-accumulator-precision-.patch`](tpu-inference/0016-core_attention-retain-float32-accumulator-precision-.patch)** — Retains `float32` softmax/output accumulator precision across the SWA and SparseMLA merge boundary instead of truncating intermediate attention outputs to `bfloat16` before log-sum-exp rescaling.
+- **[`0017-Fix-mla_swa-page-aligned-_start_offset-and-deduplica.patch`](tpu-inference/0017-Fix-mla_swa-page-aligned-_start_offset-and-deduplica.patch)** — Fixes `mla_swa.py` page-aligned `_start_offset` indexing and deduplicates redundant KV-cache DMA writes.
+- **[`0018-fix-dsv41-remove-unweighted-per-head-RMSNorm-qnorm-f.patch`](tpu-inference/0018-fix-dsv41-remove-unweighted-per-head-RMSNorm-qnorm-f.patch)** — **Primary full-context accuracy fix.** DeepSeek-V4.0 applied an unweighted per-head `RMSNorm` (`qnorm`) to queries after `wq_b`, whereas DeepSeek-V4.1 removed `qnorm` (`apply_q_norm = False` in `deepseek-inference/model.py:772` and `vllm/deepseek_v4_1/attention.py:881`). Calling `rope_kernel.qnorm_rope` forced every query head to unit RMS (`||q_h||_2 = sqrt(512)`), distorting `(q · k) / sqrt(512)` relative to the learned `attn_sink` denominator (`exp(attn_sink - m_curr)`) as context grew past 62 tokens. Switching `deepseek_v41_attention.py:387` to `rope_kernel.rope` restores 100% long-context recall (`55/55` diagnostic/needle checks) and `94.8%` completed-chain GPQA Diamond Pass@1 (`0/197` repetition loops).
 
-### 0003 — Add the DeepSeek V4.1 TPU attention, compressor and indexer
+---
 
-The three new kernels, and the cache-manager change that gives them their arrays.
+## What the 2 `vLLM` Patches Do
 
-- `deepseek_v41_attention.py` — the CSA2 attention path.
-- `deepseek_v41_compressor.py` — writes the compressed key-value record.
-- `deepseek_v41_indexer.py` — the sparse index that picks 512 of the cached positions.
-
-`kv_cache_manager.py` gains a same-name `isinstance` fix. V4 and V4.1 each define a class called
-`DeepseekV4IndexerCache`, so a check against the V4 class alone misses every V4.1 layer.
-
-### 0004 — Mask padding rows out of the DeepSeek V4.1 cache writes
-
-A padded batch row wrote into the cache at slot 0 and corrupted a real sequence. The patch masks
-those rows. It ships a 295-line unit test for the compressor.
-
-### 0005 — Give every V4.1 sliding-window layer its own KV cache array
-
-This patch is larger than its title. It carries the whole memory and quantisation story, and it is
-the one to read first if you care about performance:
-
-| File | Change |
-|---|---|
-| `deepseek_v41_attention.py` | one KV array for each of the 40 sliding-window layers, instead of one shared array |
-| `mxfp4.py` | the native MXFP4 path, and the compact `[E, num_blocks, N]` scale layout that saves 47.46 GiB |
-| `megablox/gmm_v2.py` | the grouped matrix multiply reads MXFP4 blocks natively |
-| `fused_moe_gmm.py`, `moe_weights.py` | route the mixture-of-experts weights through that path |
-| `cleanup_sharding.py` | `_drop_host_resident` stops the sweep that pulled host tensors onto the device |
-| `engram_host_lookup.py` | the Engram tables stay in host DRAM and the lookup reaches them |
-| `vllm_model_wrapper.py` | the wrapper exposes the torch module the TPU path needs |
-
-### 0006 — Trace the compressed cache bytes and the sliding-window handoff
-
-Diagnostic logging behind a flag. Keep it: it is what found patch 0007.
-
-### 0007 — Write the compressed RoPE record in the byte-plane layout the gather reads
-
-**The patch that makes the model correct.** 13 lines.
-
-`csa_gather` reads the high byte of channel `i` at offset `i`, and the low byte at offset
-`64 + i`, then rebuilds the value as `(high << 8) | low`. The record is two byte planes. The
-compressor wrote it as interleaved little-endian bf16. Every rotary value came back wrong, and
-every build before this patch produced repeated-token output that looked like a sampler fault.
-
-### 0008 — Test that the RoPE record decodes the way the gather decodes it
-
-The regression test for 0007. It decodes the written record the same way the kernel does and
-asserts the round trip. Without it, the next person to touch the compressor reintroduces the bug.
-
-## What the vLLM patches do
-
-`vllm/`, 2 files.
-
-### 0001 — `engram.py`: add a non-CUDA reference path
-
-Engram lookup was CUDA-only and failed with `Engram CPU offload requires UVA support`. The patch
-adds `_lookup_reference`, `_fused_engram_post_wkv_reference` and `_hash_ids_reference`, and a
-platform branch that selects them off CUDA.
-
-### 0002 — `weight_utils.py`: serialise the RunAI streamer per host
-
-Sixteen ranks on one node each started a RunAI streamer and each reserved its own host buffer, so
-the node ran out of memory during load. The patch adds `_runai_host_lock`, a `flock` on
-`/dev/shm/vllm_runai_streamer_host.lock`. `flock` is a kernel object, so the lock covers one node,
-which is the scope that matters.
-
-## How the recipe uses them
-
-The recipe does not patch anything at container start. Build one image from the patched trees and
-point the manifest at it:
-
-```bash
-# From the workdir that apply.sh created.
-docker build -t <YOUR_REGISTRY>/tpu-inference:v41 -f tpu-inference/docker/Dockerfile .
-docker push <YOUR_REGISTRY>/tpu-inference:v41
-```
-
-Then set that tag in `image:` in `../dsv41-flash-v6e16-serving.yaml`.
-
-The manifest keeps one guard from the development setup: it imports the model registry before the
-server loads weights, and it exits if `DeepseekV41ForCausalLM` is missing. Keep the guard. Without
-it a wrong image fails about 20 minutes later, during weight load, with an unrelated error.
-
-## What these patches do not do
-
-- They do not remove the 16-way replication of the non-expert weights, which is 111.76 GiB of the
-  378.78 GiB resident total. That needs a sharding change and it is the largest remaining lever.
-- They do not raise `--max-num-batched-tokens` above 256. See the memory ceilings in the README
-  one directory up.
-- Patch 0006 is diagnostic logging, not a fix. Remove it if you do not want the log volume.
+- **[`0001-engram-add-a-non-CUDA-reference-path.patch`](vllm/0001-engram-add-a-non-CUDA-reference-path.patch)** — Adds platform-agnostic `_lookup_reference`, `_fused_engram_post_wkv_reference`, and `_hash_ids_reference` in `engram.py` so CPU-offloaded Engram tables run on TPU without CUDA UVA calls.
+- **[`0002-weight_utils-serialise-the-runai-streamer-per-host.patch`](vllm/0002-weight_utils-serialise-the-runai-streamer-per-host.patch)** — Adds a per-node `/dev/shm/vllm_runai_streamer_host.lock` (`flock`) in `weight_utils.py` so multi-rank TPU workers on the same host do not exhaust host DRAM during concurrent GCS weight streaming.

@@ -1,0 +1,62 @@
+From d09d08e28f8dedf9211cc6f4c78c44c20dfd80b8 Mon Sep 17 00:00:00 2001
+From: Jawad Amin <jawadamin@google.com>
+Date: Thu, 17 Sep 2026 10:42:01 +0000
+Subject: [PATCH 13/18] Fix the indexer causal bound for compressed KV states
+
+A compressed state pools compression_ratio consecutive tokens, so it must
+only become visible once the query has passed its last token. The kernel
+used an inclusive bound against q_pos // ratio, which admits the state
+still holding future tokens: at ratio 2, an even position 2m could score
+the state pooling {2m, 2m+1}.
+
+Adopt the bound used by every reference implementation, (q_pos + 1) //
+ratio compared exclusively:
+  vllm deepseek_v4_1/attention.py:104
+  vllm deepseek_v4_1/common/ops/cache_utils.py:710
+  vllm deepseek_v4_1/amd/rocm.py:134
+  deepseek-inference/model.py:564-565
+
+This also makes the kernel agree with the group-close condition already
+used elsewhere in V4.1, (positions + 1) % ratio == 0, in both
+deepseek_v41_compressor.py:471 and deepseek_v41_indexer.py:191.
+---
+ .../deepseek_v4/indexer/streamindex_topk.py      | 16 ++++++++++++++--
+ 1 file changed, 14 insertions(+), 2 deletions(-)
+
+diff --git a/tpu_inference/kernels/experimental/deepseek_v4/indexer/streamindex_topk.py b/tpu_inference/kernels/experimental/deepseek_v4/indexer/streamindex_topk.py
+index 697486cb..a5ea88cc 100644
+--- a/tpu_inference/kernels/experimental/deepseek_v4/indexer/streamindex_topk.py
++++ b/tpu_inference/kernels/experimental/deepseek_v4/indexer/streamindex_topk.py
+@@ -348,7 +348,11 @@ def _scores_kernel(
+                 k_span = bkv_idx * bkv_sz + lax.broadcasted_iota(
+                     jnp.int32, s_summed.shape, 1)
+                 valid_mask = k_span < kv_lens[batch_idx]
+-                causal_mask = k_span <= bq_pos_compressed[:, None]
++                # bq_pos_compressed is an EXCLUSIVE bound, so compare with '<'.
++                # Matches vllm deepseek_v4_1/attention.py:104,
++                # common/ops/cache_utils.py:710, amd/rocm.py:134 and
++                # DeepSeek's own reference model.py:564-565.
++                causal_mask = k_span < bq_pos_compressed[:, None]
+                 mask = jnp.logical_and(valid_mask, causal_mask)
+                 s_summed = jnp.where(mask, s_summed, -jnp.inf)
+                 ret.append(s_summed.reshape(-1, num_sublanes_bkv, 128))
+@@ -370,7 +374,15 @@ def _scores_kernel(
+             for batch_idx in range(seq_batch_size):
+                 q_pos = (seq_lens[batch_idx] - q_lens[batch_idx] +
+                          bq_idx * bq_sz + jnp.arange(bq_sz, dtype=jnp.int32))
+-                bq_pos_compressed_vec.append(q_pos // compression_ratio)
++                # Exclusive bound on the compressed states a query at absolute
++                # position q_pos may attend to. A compressed state pools
++                # compression_ratio consecutive tokens, so it only becomes
++                # visible once the query has passed its LAST token; the count of
++                # fully-closed states is therefore (q_pos + 1) // ratio.
++                # Using q_pos // ratio with an inclusive bound admits the state
++                # that still contains future tokens.
++                bq_pos_compressed_vec.append(
++                    (q_pos + 1) // compression_ratio)
+ 
+             # Wait for cur bq if not ready yet
+             wait_fetch_bq(batch_start_seq_idx, bq_idx, bq_sem_idx)
+-- 
+2.55.0.1082.g2b9226bbc0-goog
+

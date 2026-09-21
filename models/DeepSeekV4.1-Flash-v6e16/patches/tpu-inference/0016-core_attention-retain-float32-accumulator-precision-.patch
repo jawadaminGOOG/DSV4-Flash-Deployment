@@ -1,0 +1,125 @@
+From f659dc26855265c002ab8d902605d65cad510655 Mon Sep 17 00:00:00 2001
+From: Jawad Amin <jawadamin@google.com>
+Date: Thu, 17 Sep 2026 17:50:04 +0000
+Subject: [PATCH 16/18] core_attention: retain float32 accumulator precision
+ across SWA and sparse MLA boundary
+
+---
+ tpu_inference/FORK_HEAD                       |  2 +-
+ .../deepseek_v4/core_attention/mla_swa.py     | 35 ++++++++++++++-----
+ .../deepseek_v4/core_attention/sparse_mla.py  |  4 +--
+ 3 files changed, 29 insertions(+), 12 deletions(-)
+
+diff --git a/tpu_inference/FORK_HEAD b/tpu_inference/FORK_HEAD
+index dffc1ad3..8bc355c9 100644
+--- a/tpu_inference/FORK_HEAD
++++ b/tpu_inference/FORK_HEAD
+@@ -1 +1 @@
+-9ed9c57328fb7cea44cd808ad9c8b3a5ff10573f
++1304b903db6eb155ef0efde6d82350a690f841ab
+diff --git a/tpu_inference/kernels/experimental/deepseek_v4/core_attention/mla_swa.py b/tpu_inference/kernels/experimental/deepseek_v4/core_attention/mla_swa.py
+index 953ea99d..84c7487f 100644
+--- a/tpu_inference/kernels/experimental/deepseek_v4/core_attention/mla_swa.py
++++ b/tpu_inference/kernels/experimental/deepseek_v4/core_attention/mla_swa.py
+@@ -117,7 +117,10 @@ def _mla_sliding_window_ragged_paged_attention_kernel(
+     total_num_pages, physical_page_size_per_kv_packing, kv_packing, lkv_dim = (
+         cache_kv_hbm_ref.shape)
+     q_dtype = q_hbm_ref.dtype
+-    assert o_hbm_ref.dtype == q_dtype
++    if unnormalized_output:
++        assert o_hbm_ref.dtype == jnp.float32
++    else:
++        assert o_hbm_ref.dtype == q_dtype
+     assert head_dim % 128 == 0
+     token_bytes = head_dim * get_dtype_bitwidth(q_dtype) // 8
+     slot_bytes = kv_packing * lkv_dim
+@@ -717,7 +720,7 @@ def _mla_sliding_window_ragged_paged_attention_kernel(
+ 
+             if unnormalized_output:
+                 l_sum = broadcast_minor(l_ref[...], acc.shape)  # noqa
+-                out = acc.astype(q_dtype)
++                out = acc.astype(jnp.float32)
+             else:
+                 attention_sinks = jnp.concat(
+                     [attention_sinks_ref[...] for _ in range(bq_sz)])[...,
+@@ -735,10 +738,16 @@ def _mla_sliding_window_ragged_paged_attention_kernel(
+             wait_send_bo(bo_sem_idx)
+ 
+             # Store output from acc to bo.
+-            bo_x2_ref.at[bo_sem_idx].bitcast(jnp.int32).reshape(
+-                bq_sz * num_q_heads_per_q_packing,
+-                head_dim,
+-            )[...] = pltpu.bitcast(out, jnp.int32)
++            if unnormalized_output:
++                bo_x2_ref.at[bo_sem_idx].reshape(
++                    bq_sz * num_q_heads,
++                    head_dim,
++                )[...] = out
++            else:
++                bo_x2_ref.at[bo_sem_idx].bitcast(jnp.int32).reshape(
++                    bq_sz * num_q_heads_per_q_packing,
++                    head_dim,
++                )[...] = pltpu.bitcast(out, jnp.int32)
+             bl_x2_ref.at[bo_sem_idx][:bq_sz, :num_q_heads] = l_ref[
+                 ..., 0].reshape(bq_sz, num_q_heads)
+             bm_x2_ref.at[bo_sem_idx][:bq_sz, :num_q_heads] = m_ref[
+@@ -1009,7 +1018,14 @@ def mla_sliding_window_ragged_paged_attention(
+             q.dtype,
+         )
+ 
+-        bo_double_buf = bq_double_bufq
++        out_dtype = jnp.float32 if unnormalized_output else q.dtype
++        if unnormalized_output:
++            bo_double_buf = pltpu.VMEM(
++                (2, bq_sz, num_q_heads, head_dim),
++                jnp.float32,
++            )
++        else:
++            bo_double_buf = bq_double_bufq
+ 
+         num_l_heads = align_to(num_q_heads, 128)
+         bl_double_buf = pltpu.VMEM(
+@@ -1083,7 +1099,7 @@ def mla_sliding_window_ragged_paged_attention(
+                     disable_bounds_checks=True,
+                 ),
+                 out_shape=[
+-                    jax.ShapeDtypeStruct(shape=q.shape, dtype=q.dtype),
++                    jax.ShapeDtypeStruct(shape=q.shape, dtype=out_dtype),
+                     jax.ShapeDtypeStruct(shape=cache_kv.shape,
+                                          dtype=cache_kv.dtype),
+                     jax.ShapeDtypeStruct(shape=(q.shape[0], num_l_heads),
+@@ -1116,7 +1132,8 @@ def mla_sliding_window_ragged_paged_attention(
+     num_l_heads = align_to(num_q_heads, 128)
+     l_sum = jnp.zeros((q.shape[0], num_l_heads), dtype=jnp.float32)
+     m = jnp.zeros((q.shape[0], num_l_heads), dtype=jnp.float32)
+-    in_output = jnp.zeros_like(q)
++    out_dtype = jnp.float32 if unnormalized_output else q.dtype
++    in_output = jnp.zeros(q.shape, dtype=out_dtype)
+     output, updated_kv, out_l, out_m = run_mla_kernel(
+         q,
+         new_kv,
+diff --git a/tpu_inference/kernels/experimental/deepseek_v4/core_attention/sparse_mla.py b/tpu_inference/kernels/experimental/deepseek_v4/core_attention/sparse_mla.py
+index 65f535c4..9c78bd41 100644
+--- a/tpu_inference/kernels/experimental/deepseek_v4/core_attention/sparse_mla.py
++++ b/tpu_inference/kernels/experimental/deepseek_v4/core_attention/sparse_mla.py
+@@ -653,7 +653,7 @@ def sparse_ragged_paged_attention(
+         (0, q.shape[1] - actual_num_q_heads),
+         constant_values=jnp.finfo(attention_sinks.dtype).min,
+     )
+-    assert swa_accumution.dtype == q.dtype
++    assert swa_accumution.dtype in (jnp.float32, q.dtype)
+     swa_accumution, swa_l, swa_m = prepare_swa_inputs(swa_accumution, swa_l,
+                                                       swa_m)
+ 
+@@ -719,7 +719,7 @@ def sparse_ragged_paged_attention(
+ 
+         swa_acc_double_buf = pltpu.VMEM(
+             (2, batch_size, num_q_heads, head_dim),
+-            q.dtype,
++            swa_accumution.dtype,
+         )
+ 
+         scratch_shapes = [
+-- 
+2.55.0.1082.g2b9226bbc0-goog
+

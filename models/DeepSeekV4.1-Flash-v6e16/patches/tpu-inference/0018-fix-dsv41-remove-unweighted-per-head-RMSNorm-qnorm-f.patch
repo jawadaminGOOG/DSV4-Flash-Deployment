@@ -1,0 +1,44 @@
+From d85ce9c127cd414b3d973f1d9d824f14f3f438ac Mon Sep 17 00:00:00 2001
+From: Jawad Amin <jawadamin@google.com>
+Date: Thu, 17 Sep 2026 23:45:21 +0000
+Subject: [PATCH 18/18] fix(dsv41): remove unweighted per-head RMSNorm (qnorm)
+ from Q in V4.1 attention
+
+---
+ tpu_inference/FORK_HEAD                                      | 2 +-
+ .../experimental/deepseek_v41/deepseek_v41_attention.py      | 5 ++---
+ 2 files changed, 3 insertions(+), 4 deletions(-)
+
+diff --git a/tpu_inference/FORK_HEAD b/tpu_inference/FORK_HEAD
+index c3a8f7ff..90f0651e 100644
+--- a/tpu_inference/FORK_HEAD
++++ b/tpu_inference/FORK_HEAD
+@@ -1 +1 @@
+-f659dc26855265c002ab8d902605d65cad510655
++a797deaf802f6f70c11191c03404001a4f2dada9
+diff --git a/tpu_inference/layers/vllm/custom_ops/experimental/deepseek_v41/deepseek_v41_attention.py b/tpu_inference/layers/vllm/custom_ops/experimental/deepseek_v41/deepseek_v41_attention.py
+index d96c8da9..5d9abdfd 100644
+--- a/tpu_inference/layers/vllm/custom_ops/experimental/deepseek_v41/deepseek_v41_attention.py
++++ b/tpu_inference/layers/vllm/custom_ops/experimental/deepseek_v41/deepseek_v41_attention.py
+@@ -389,16 +389,15 @@ class VllmDeepseekV41MLAAttention(DeepseekV4Attention):
+             q: torch.Tensor,  # [num_tokens, n_local_heads, head_dim]
+             positions: torch.Tensor,  # [num_tokens], int64
+     ) -> torch.Tensor:
+-        """Per-head RMSNorm (no weight) + GPT-J interleaved RoPE on q."""
++        """GPT-J interleaved RoPE on q (V4.1 does not apply per-head RMSNorm to q)."""
+         mesh = get_vllm_model_wrapper_context().mesh
+         return torch_view(
+             sharded_rope(
+-                rope_kernel.qnorm_rope,
++                rope_kernel.rope,
+                 mesh,
+                 jax_view(q),
+                 jax_view(positions),
+                 jax_view(self.rotary_emb.cos_sin_cache),
+-                eps=self.eps,
+             ))
+ 
+     def kv_rope(
+-- 
+2.55.0.1082.g2b9226bbc0-goog
+

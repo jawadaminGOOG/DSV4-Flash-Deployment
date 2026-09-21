@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Concurrency sweep over three workload shapes against a live vLLM endpoint.
 
-This extends `wave-3/scripts/bench.py`, which measures one shape at six
+This extends the single-shape benchmark client, which measures one shape at six
 concurrency levels. The goal needs three shapes at ten levels, from C=1 to
 C=512, in the format of the sglang-rtx-pro-6000 DeepSeek-V4-Flash report.
 

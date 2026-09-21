@@ -351,6 +351,10 @@ spec:
                 # 0.93 a hard out-of-memory killed the run. 0.80 keeps a KV
                 # pool of about 1,470,000 tokens, derived from the reported
                 # cache-usage percentage at five concurrency levels.
+                # Full 16,384-token context for all three shapes (1k/1k, 8k/1k,
+                # 1k/8k) and GPQA Diamond (--max-num-seqs 64 fits the 1 MiB SMEM
+                # block-table ceiling at 16K). For a 2,048-token-only deployment,
+                # you may substitute `--max-model-len 2048 --max-num-seqs 256`.
                 exec vllm serve "${MODEL_URI}" \
                   --served-model-name deepseek-ai/DeepSeek-V4.1-Flash \
                   --load-format=runai_streamer \
@@ -361,9 +365,9 @@ spec:
                   --additional_config '{"sharding": {"sharding_strategy": {"enable_dp_attention": true}}}' \
                   --gpu-memory-utilization 0.80 \
                   --no-enable-prefix-caching \
-                  --max-model-len 2048 \
+                  --max-model-len 16384 \
                   --max-num-batched-tokens 256 \
-                  --max-num-seqs 256 \
+                  --max-num-seqs 64 \
                   --host 0.0.0.0 --port 8000
               else
                 until getent hosts "${HEAD_HOST}" >/dev/null 2>&1; do

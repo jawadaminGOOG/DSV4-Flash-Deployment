@@ -1,0 +1,130 @@
+From 3554ccfef540fcab66f7462be2ec1d03f1508f9e Mon Sep 17 00:00:00 2001
+From: Jawad Amin <jawadamin@google.com>
+Date: Thu, 17 Sep 2026 03:48:35 +0000
+Subject: [PATCH 12/18] Make the mHC and unfilled-parameter reports readable
+
+The r38 revision produced the mHC dump but every leaf came back
+"unreadable: <class 'torch.Tensor'>", so the question it was added to
+answer stayed open for another revision. Two separate faults.
+
+The read used torchax's jax_view. At the point the loader reports, the
+parameters are still plain torch tensors, and jax_view accepts only its
+own tensor type. Read with torch first and keep the jax view as the
+fallback for a parameter that has already been converted.
+
+The successful branch logged at info. These reports run inside the Ray
+workers, whose logger drops info before it reaches the pod log, so only
+the warning branch was ever visible. This is also why the companion
+DSV41_UNFILLED_SUMMARY line has never once appeared in a log; its
+silence was repeatedly misread as the check never having run. Both
+lines now log at warning.
+---
+ .../models/vllm/experimental/deepseek_v41.py  | 68 +++++++++++++------
+ 1 file changed, 47 insertions(+), 21 deletions(-)
+
+diff --git a/tpu_inference/models/vllm/experimental/deepseek_v41.py b/tpu_inference/models/vllm/experimental/deepseek_v41.py
+index 4afb1c3f..7349f45c 100644
+--- a/tpu_inference/models/vllm/experimental/deepseek_v41.py
++++ b/tpu_inference/models/vllm/experimental/deepseek_v41.py
+@@ -1300,15 +1300,11 @@ class DeepseekV41LLMForCausalLM(
+             unfilled += 1
+             detail = ""
+             try:
+-                value = jax_view(param.data)
+-                if jnp.issubdtype(value.dtype, jnp.floating):
+-                    finite = jnp.where(jnp.isfinite(value), jnp.abs(value),
+-                                       0.0)
+-                    detail = (f" nan={bool(jnp.isnan(value).any())}"
+-                              f" inf={bool(jnp.isinf(value).any())}"
+-                              f" absmax={float(jnp.max(finite))}")
++                allzero, low, high, mean, _ = self._leaf_stats(param.data)
++                detail = (f" allzero={allzero} min={low} max={high}"
++                          f" mean={mean}")
+             except Exception as error:  # noqa: BLE001
+-                detail = f" (stats unavailable: {error})"
++                detail = f" (stats unavailable: {error!r})"
+             logger.warning(
+                 "DSV41_UNFILLED parameter %s received no checkpoint tensor: "
+                 "shape=%s dtype=%s%s", name, tuple(param.shape), param.dtype,
+@@ -1316,8 +1312,13 @@ class DeepseekV41LLMForCausalLM(
+         # Report the count even when it is zero. Without this line a silent log
+         # means either "every parameter was filled" or "the check never ran",
+         # and those two need different follow-up.
+-        logger.info("DSV41_UNFILLED_SUMMARY checked=%d unfilled=%d", checked,
+-                    unfilled)
++        #
++        # Warning, not info: this runs inside the Ray workers, whose logger
++        # drops info before it reaches the pod log. As an info this line never
++        # appeared once, and its silence was repeatedly misread as "the check
++        # never ran".
++        logger.warning("DSV41_UNFILLED_SUMMARY checked=%d unfilled=%d", checked,
++                       unfilled)
+         self._report_mhc_mixing_values()
+ 
+     # The four leaves below gate how much of each sublayer reaches the residual
+@@ -1333,6 +1334,29 @@ class DeepseekV41LLMForCausalLM(
+     _MHC_LEAVES = ("hc_attn_scale", "hc_ffn_scale", "hc_attn_base",
+                    "hc_ffn_base")
+ 
++    @staticmethod
++    def _leaf_stats(tensor):
++        """Return ``(allzero, min, max, mean, first8)`` for a parameter.
++
++        When the loader reports, the parameters are still plain torch
++        tensors. ``torchax``'s ``jax_view`` accepts only its own tensor type
++        and raises a bare ``<class 'torch.Tensor'>`` on a plain one, which is
++        exactly what the r38 dump hit: every leaf came back "unreadable" and
++        the question stayed open for another revision. Read with torch first,
++        and keep the jax view as the fallback for a parameter that has already
++        been converted.
++        """
++        try:
++            flat = tensor.detach().reshape(-1).to(torch.float32)
++            return (bool(torch.all(flat == 0)), float(torch.min(flat)),
++                    float(torch.max(flat)), float(torch.mean(flat)),
++                    [float(v) for v in flat[:8]])
++        except Exception:  # noqa: BLE001
++            flat = jnp.ravel(jax_view(tensor))
++            return (bool(jnp.all(flat == 0)), float(jnp.min(flat)),
++                    float(jnp.max(flat)), float(jnp.mean(flat)),
++                    [float(v) for v in flat[:8]])
++
+     def _report_mhc_mixing_values(self) -> None:
+         """Log the loaded hyper-connection mixing values for a few layers.
+ 
+@@ -1357,19 +1381,21 @@ class DeepseekV41LLMForCausalLM(
+         for name in sorted(wanted):
+             param = wanted[name]
+             try:
+-                value = jax_view(param.data)
+-                flat = jnp.ravel(value)
+-                allzero = bool(jnp.all(flat == 0))
+-                logger.info(
+-                    "DSV41_MHC_VALUE %s shape=%s dtype=%s allzero=%s "
+-                    "min=%s max=%s mean=%s first8=%s", name,
+-                    tuple(param.shape), param.dtype, allzero,
+-                    float(jnp.min(flat)), float(jnp.max(flat)),
+-                    float(jnp.mean(flat)),
+-                    [float(v) for v in flat[:8]])
++                allzero, low, high, mean, first8 = self._leaf_stats(param.data)
+             except Exception as error:  # noqa: BLE001
+-                logger.warning("DSV41_MHC_VALUE %s unreadable: %s", name,
++                logger.warning("DSV41_MHC_VALUE %s unreadable: %r", name,
+                                error)
++                continue
++            # Warning, not info. This runs inside the Ray workers, and their
++            # logger does not pass info through to the pod log. That is why
++            # the companion DSV41_UNFILLED_SUMMARY line, which is an info,
++            # has never once appeared in a log while the warning beside it
++            # came through.
++            logger.warning(
++                "DSV41_MHC_VALUE %s shape=%s dtype=%s allzero=%s "
++                "min=%s max=%s mean=%s first8=%s", name,
++                tuple(param.shape), param.dtype, allzero,
++                low, high, mean, first8)
+ 
+     def process_weights_after_loading(self) -> None:
+         self.model.finalize_mega_moe_weights()
+-- 
+2.55.0.1082.g2b9226bbc0-goog
+

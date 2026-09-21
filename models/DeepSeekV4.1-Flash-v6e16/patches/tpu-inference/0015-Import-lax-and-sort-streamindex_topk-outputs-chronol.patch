@@ -1,0 +1,57 @@
+From 1304b903db6eb155ef0efde6d82350a690f841ab Mon Sep 17 00:00:00 2001
+From: Jawad Amin <jawadamin@google.com>
+Date: Thu, 17 Sep 2026 15:09:07 +0000
+Subject: [PATCH 15/18] Import lax and sort streamindex_topk outputs
+ chronologically
+
+---
+ .../deepseek_v41/deepseek_v41_indexer.py      | 19 +++++++++++++++----
+ 1 file changed, 15 insertions(+), 4 deletions(-)
+
+diff --git a/tpu_inference/layers/vllm/custom_ops/experimental/deepseek_v41/deepseek_v41_indexer.py b/tpu_inference/layers/vllm/custom_ops/experimental/deepseek_v41/deepseek_v41_indexer.py
+index 7bede861..efc6e0a6 100644
+--- a/tpu_inference/layers/vllm/custom_ops/experimental/deepseek_v41/deepseek_v41_indexer.py
++++ b/tpu_inference/layers/vllm/custom_ops/experimental/deepseek_v41/deepseek_v41_indexer.py
+@@ -28,6 +28,7 @@ import functools
+ from typing import Optional
+ 
+ import jax
++from jax import lax
+ import jax.numpy as jnp
+ import torch
+ import torch.nn as nn
+@@ -263,9 +264,9 @@ class VllmDeepseekV41Indexer(DeepseekV4Indexer):
+             short_topk = jnp.where(offsets < num_compressed, offsets, -1)
+ 
+             use_streamindex = jnp.any(num_compressed > self.topk_tokens)
+-            return lax.cond(
+-                use_streamindex,
+-                lambda: streamindex_topk(
++
++            def _run_streamindex():
++                raw_topk = streamindex_topk(
+                     q=q,
+                     indexer_weights=indexer_weights,
+                     cache_kv=cache_kv,
+@@ -279,7 +280,17 @@ class VllmDeepseekV41Indexer(DeepseekV4Indexer):
+                     # num_queries_per_block.
+                     num_kv_pages_per_block=(3, 2, 2),
+                     num_queries_per_block=(1, 128, 128),
+-                ),
++                )
++                # Sort selected indices chronologically, keeping -1 padding at the end.
++                # Matches DeepSeek reference model.py:579 (idxs.sort(dim=-1).values).
++                large_val = jnp.int32(100000000)
++                sorted_topk = jnp.sort(
++                    jnp.where(raw_topk < 0, large_val, raw_topk), axis=-1)
++                return jnp.where(sorted_topk == large_val, -1, sorted_topk)
++
++            return lax.cond(
++                use_streamindex,
++                _run_streamindex,
+                 lambda: short_topk,
+             )
+ 
+-- 
+2.55.0.1082.g2b9226bbc0-goog
+
