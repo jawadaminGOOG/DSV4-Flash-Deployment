@@ -1,0 +1,1534 @@
+From 4d1621c1c3bc734b9d0e267f0c906a59b5ff785f Mon Sep 17 00:00:00 2001
+From: Jawad Amin <jawadamin@google.com>
+Date: Thu, 10 Sep 2026 19:40:52 +0000
+Subject: [PATCH 3/8] Add the DeepSeek V4.1 TPU attention, compressor and
+ indexer
+
+V4.1 keeps the class names of V4 but changes the compressor contract and
+the layer topology, so the TPU custom ops go in a sibling package rather
+than behind flags on the V4 ones.
+
+The compressor implements the V4.1 math in JAX. Ratio 1 is an RMSNorm on
+512 channels. Ratio 2 pools two rows with a per-channel softmax gate over
+the trailing channels of the projection, and it keeps a float32 ring for
+the groups that straddle a chunk boundary. Both write the packed record
+that the tuned sparse-MLA kernel reads: 448 FP8 E4M3 values with 7 E8M0
+block scales in the main array, and 64 BF16 rotary channels in the
+companion array.
+
+The indexer derives its keys from the compressor latent, which V4 did
+not do, and rotates them at the group's first-token position.
+
+The attention layer selects the compressed cache by the kv-source role
+rather than by the compress ratio. V4.1 uses ratios 0, 1 and 2, so every
+ratio test that V4 relies on is false for every layer, and a straight
+copy would take the dense path with no error. An index source publishes
+its top-k indices for the consumer layers below it, because the shared
+in-place buffer of the CUDA path cannot work on the functional JAX path.
+
+The runner's overlay planner now recognizes V4.1 and gives the split
+NoPE and RoPE treatment to its kv-source layers. It also raises when a
+page size is not a multiple of the row packing, which would otherwise
+drop the last states of every page without an error.
+---
+ .../experimental/deepseek_v41/__init__.py     |  19 +
+ .../deepseek_v41/deepseek_v41_attention.py    | 611 ++++++++++++++++++
+ .../deepseek_v41/deepseek_v41_compressor.py   | 429 ++++++++++++
+ .../deepseek_v41/deepseek_v41_indexer.py      | 283 ++++++++
+ .../models/vllm/experimental/__init__.py      |   2 +
+ tpu_inference/runner/kv_cache_manager.py      |  59 +-
+ 6 files changed, 1395 insertions(+), 8 deletions(-)
+ create mode 100644 tpu_inference/layers/vllm/custom_ops/experimental/deepseek_v41/__init__.py
+ create mode 100644 tpu_inference/layers/vllm/custom_ops/experimental/deepseek_v41/deepseek_v41_attention.py
+ create mode 100644 tpu_inference/layers/vllm/custom_ops/experimental/deepseek_v41/deepseek_v41_compressor.py
+ create mode 100644 tpu_inference/layers/vllm/custom_ops/experimental/deepseek_v41/deepseek_v41_indexer.py
+
+diff --git a/tpu_inference/layers/vllm/custom_ops/experimental/deepseek_v41/__init__.py b/tpu_inference/layers/vllm/custom_ops/experimental/deepseek_v41/__init__.py
+new file mode 100644
+index 00000000..af7db03d
+--- /dev/null
++++ b/tpu_inference/layers/vllm/custom_ops/experimental/deepseek_v41/__init__.py
+@@ -0,0 +1,19 @@
++# Copyright 2026 Google LLC
++#
++# Licensed under the Apache License, Version 2.0 (the "License");
++# you may not use this file except in compliance with the License.
++# You may obtain a copy of the License at
++#
++#     http://www.apache.org/licenses/LICENSE-2.0
++#
++# Unless required by applicable law or agreed to in writing, software
++# distributed under the License is distributed on an "AS IS" BASIS,
++# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++# See the License for the specific language governing permissions and
++# limitations under the License.
++"""TPU custom ops for DeepSeek V4.1 attention.
++
++V4.1 keeps the class names of V4 but changes the compressor contract, so this
++package is a sibling of ``deepseek_v4`` rather than a set of flags on it. See
++the module docstrings for the delta against each V4 file.
++"""
+diff --git a/tpu_inference/layers/vllm/custom_ops/experimental/deepseek_v41/deepseek_v41_attention.py b/tpu_inference/layers/vllm/custom_ops/experimental/deepseek_v41/deepseek_v41_attention.py
+new file mode 100644
+index 00000000..21fbcc1e
+--- /dev/null
++++ b/tpu_inference/layers/vllm/custom_ops/experimental/deepseek_v41/deepseek_v41_attention.py
+@@ -0,0 +1,611 @@
++# pytype: skip-file
++# Copyright 2026 Google LLC
++#
++# Licensed under the Apache License, Version 2.0 (the "License");
++# you may not use this file except in compliance with the License.
++# You may obtain a copy of the License at
++#
++#      http://www.apache.org/licenses/LICENSE-2.0
++#
++# Unless required by applicable law or agreed to in writing, software
++# distributed under the License is distributed on an "AS IS" BASIS,
++# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++# See the License for the specific language governing permissions and
++# limitations under the License.
++"""TPU interception for DeepSeek-V4.1 MLA attention (torchax path).
++
++``DeepseekV4Attention`` is an abstract ``nn.Module`` that the model builds
++directly, not a ``CustomOp``, so there is no registry hook to swap it. Its
++constructor is also CUDA-bound. The TPU port therefore substitutes the class
++symbol before the model is built, as the V4 port does.
++
++The abstract contract did not change between V4 and V4.1: the same three
++methods, with the same signatures. The layer topology did change, and this file
++carries the deltas that follow.
++
++1. A layer owns a compressed KV cache when ``is_kv_source`` is true, not when
++   its compress ratio has a particular value. V4.1-Flash uses ratios 0, 1 and
++   2, so every ``compress_ratio == 4`` test that the V4 file relies on is false
++   for every layer. A copy of the V4 file takes the dense path everywhere and
++   reports no error.
++2. A layer runs an indexer only when ``is_index_source`` is true. Every other
++   compressed layer reads the top-k indices that the nearest index source below
++   it published. This file publishes them on the source module, because the
++   shared ``topk_indices_buffer`` of the CUDA path is an in-place torch buffer
++   that the functional JAX path cannot write.
++3. The compressor consumes the ``fused_wkv_wgate`` projection of the hidden
++   states, not the hidden states. The projection therefore runs in this layer.
++4. The indexer derives its keys from the compressor latent, so there is no
++   indexer K projection over the hidden states.
++5. There is no auxiliary stream. TPU has no CUDA stream object, and the XLA
++   compiler schedules the independent projections itself.
++"""
++import functools
++from unittest.mock import patch
++
++import jax
++import torch
++from jax.sharding import PartitionSpec as P
++from torchax.interop import jax_view, torch_view
++from vllm.config import VllmConfig
++from vllm.forward_context import get_forward_context
++from vllm.models.deepseek_v4_1 import attention as dsv41_attention
++from vllm.models.deepseek_v4_1.attention import (DeepseekV4Attention,
++                                                 _replace_layer_index)
++from vllm.platforms import current_platform
++from vllm.v1.attention.backends.mla.sparse_swa import DeepseekV4SWACache
++from vllm.v1.kv_cache_interface import (KVCacheSpec, MLAAttentionSpec,
++                                        SlidingWindowMLASpec)
++
++from tpu_inference.kernels.experimental.deepseek_v4 import rope as rope_kernel
++from tpu_inference.kernels.experimental.deepseek_v4.core_attention.mla_swa import \
++    mla_sliding_window_ragged_paged_attention
++from tpu_inference.kernels.experimental.deepseek_v4.core_attention.sparse_mla import \
++    sparse_ragged_paged_attention
++from tpu_inference.kernels.experimental.deepseek_v4.o_projection import \
++    fused_reverse_rope_wo_a_projection
++from tpu_inference.layers.common.sharding import ShardingAxisName
++from tpu_inference.layers.vllm.custom_ops.experimental.deepseek_v41.deepseek_v41_compressor import \
++    VllmDeepseekV41Compressor
++from tpu_inference.layers.vllm.custom_ops.experimental.deepseek_v41.deepseek_v41_indexer import (
++    VllmDeepseekV41Indexer, VllmDeepseekV41IndexerCache)
++from tpu_inference.logger import init_logger
++from tpu_inference.models.vllm.vllm_model_wrapper_context import \
++    get_vllm_model_wrapper_context
++
++logger = init_logger(__name__)
++
++# The largest compress ratio a V4.1 layer uses. The SWA cache overlays the
++# compressed NoPE array of a KV-source layer, whose page holds
++# ``cache_config.block_size // compress_ratio`` records of 512 bytes. A ratio
++# of 2 gives the smallest such page, so it bounds the SWA page for every host.
++_MAX_COMPRESS_RATIO = 2
++
++
++def cdiv(a, b):
++    assert b != 0
++    return (a + b - 1) // b
++
++
++def align_to(x, a):
++    return cdiv(x, a) * a
++
++
++def _largest_divisor(x: int, cap: int) -> int:
++    """The largest divisor of ``x`` that is not greater than ``cap``."""
++    for candidate in range(min(x, cap), 0, -1):
++        if x % candidate == 0:
++            return candidate
++    return 1
++
++
++def sharded_rope(rope_fn, mesh, x, positions, cos_sin_cache, **kwargs):
++    data_spec = P(ShardingAxisName.ATTN_DATA)
++
++    def _rope(x, positions, cos_sin_cache):
++        return rope_fn(x, positions, cos_sin_cache, **kwargs)
++
++    return jax.shard_map(
++        _rope,
++        mesh=mesh,
++        in_specs=(data_spec, data_spec, P()),
++        out_specs=data_spec,
++        check_vma=False,
++    )(x, positions, cos_sin_cache)
++
++
++class VllmDeepseekV41SWACache(DeepseekV4SWACache):
++    """TPU-compatible sliding-window cache.
++
++    Every V4.1 layer owns one, including the ratio-0 layers that have nothing
++    else.
++    """
++
++    def __init__(self, *args, **kwargs):
++        # Forward the ctor arguments unchanged. V4.1 passes ``backend_cls`` and
++        # ``block_size``; a pass-through keeps this subclass working when
++        # upstream adds another one.
++        super().__init__(*args, **kwargs)
++        cache_config = self.cache_config
++        # The SWA cache overlays the compressed NoPE array of a KV-source
++        # layer. That array holds ``block_size // compress_ratio`` records of
++        # 512 bytes in one page. An SWA entry is a raw bf16 latent of 512
++        # values, which is 1024 bytes, so a page holds
++        # ``block_size // compress_ratio // 2`` of them. Raw bf16 avoids the
++        # cost of quantization and dequantization inside the sliding window,
++        # and the window is short enough that the extra bytes are small.
++        self.block_size = min(
++            cache_config.block_size // _MAX_COMPRESS_RATIO // 2,
++            self.window_size)
++
++    def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec:
++        # ``mla_swa`` keeps the SWA entries as raw bf16, packed as uint8.
++        return SlidingWindowMLASpec(
++            block_size=self.block_size,
++            num_kv_heads=1,
++            head_size=512 * 2,
++            dtype=torch.uint8,
++            sliding_window=self.window_size,
++            cache_dtype_str=self.cache_config.cache_dtype,
++            alignment=None,
++        )
++
++
++class VllmDeepseekV41MLAAttention(DeepseekV4Attention):
++    """TPU-compatible DeepSeek-V4.1 MLA attention."""
++
++    # The TPU SWA cache stores raw bf16 rows, not the UE8M0 block-scaled fp8 of
++    # the CUDA backends. Declaring the plain-row layout keeps the base ctor
++    # from rewriting ``cache_config.cache_dtype`` to ``fp8_ds_mla``, which
++    # would make the runner budget a 576-byte token slot that no TPU kernel
++    # reads.
++    use_fp8_ds_mla_layout = False
++
++    # Abstract platform hooks required to instantiate the DeepseekV4Attention
++    # ABC; unused on the TPU pass-through path.
++    from vllm.models.deepseek_v4_1.sparse_mla import DeepseekV4SparseMLABackend
++
++    class _TPUDeepseekV41Backend(DeepseekV4SparseMLABackend):
++
++        @staticmethod
++        def get_name() -> str:
++            return "TPU_MLA"
++
++    backend_cls = _TPUDeepseekV41Backend
++
++    def __init__(
++        self,
++        vllm_config: VllmConfig,
++        prefix: str = "",
++        topk_indices_buffer: torch.Tensor | None = None,
++        aux_stream_list: list | None = None,
++        candidate_block_buffer: torch.Tensor | None = None,
++    ) -> None:
++        # The base ctor builds the indexer, its cache, the compressor and the
++        # SWA cache from the vLLM upstream classes. Temporarily rebind the
++        # module-level symbols the base ctor references so it constructs the
++        # TPU subclasses directly.
++        originals = {
++            name: getattr(dsv41_attention, name)
++            for name in ("DeepseekV4Indexer", "DeepseekV4IndexerCache",
++                         "DeepseekCompressor", "DeepseekV4SWACache")
++        }
++        dsv41_attention.DeepseekV4Indexer = VllmDeepseekV41Indexer
++        dsv41_attention.DeepseekV4IndexerCache = VllmDeepseekV41IndexerCache
++        dsv41_attention.DeepseekCompressor = VllmDeepseekV41Compressor
++        dsv41_attention.DeepseekV4SWACache = VllmDeepseekV41SWACache
++
++        # The base ctor also allocates CUDA-backed stream-sync events (the
++        # ``ln_events``), used only for GPU stream overlap. Neutralize both
++        # symbols: a real ``torch.cuda.Event`` is a dummy stub on TPU.
++        orig_event = torch.Event
++        orig_cuda_event = torch.cuda.Event
++        torch.Event = lambda *args, **kwargs: None
++        torch.cuda.Event = lambda *args, **kwargs: None
++        try:
++            # The base ctor allocates buffers on the platform device type.
++            # Pass ``cpu`` to keep those allocations off the accelerator; the
++            # forward below never reads them.
++            with patch.object(current_platform, "device_type", "cpu"):
++                super().__init__(
++                    vllm_config,
++                    prefix=prefix,
++                    topk_indices_buffer=topk_indices_buffer,
++                    aux_stream_list=None,
++                    # The candidate-block path narrows the indexer search with
++                    # blocks that layer ``candidate_source_layer_id`` picks.
++                    # The TPU indexer searches the whole cache instead, so it
++                    # needs no candidate buffer. That search is wider, not
++                    # narrower, so recall does not drop.
++                    candidate_block_buffer=None,
++                )
++        finally:
++            for name, value in originals.items():
++                setattr(dsv41_attention, name, value)
++            torch.Event = orig_event
++            torch.cuda.Event = orig_cuda_event
++
++        # Prefix of the layer whose indexer publishes this layer's top-k
++        # indices (itself for an index source).
++        self.index_source_prefix: str | None = None
++        if self.index_source_layer_id is not None:
++            self.index_source_prefix = _replace_layer_index(
++                prefix, self.index_source_layer_id)
++        # ``attention_impl`` sets this on an index source. Consumer layers read
++        # it later in the same forward pass.
++        self._published_topk_indices = None
++
++    @classmethod
++    def get_padded_num_q_heads(cls, num_heads: int) -> int:
++        return num_heads
++
++    def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec | None:
++        """Only a KV-source layer owns a compressed cache.
++
++        V4 keyed this on the compress ratio, because a ratio of 4 meant the
++        layer was the compressed-sparse-attention source. V4.1 states the role
++        directly, and its ratios never take that value, so the ratio test must
++        not survive the port. A consumer reads the source cache through the
++        forward context, and a ratio-0 layer is pure sliding window.
++        """
++        if not self.is_kv_source:
++            return None
++
++        # ``sparse_mla`` reads the NoPE record from this array and the rotary
++        # channels from the companion ``{prefix}_rope`` array; the budget here
++        # covers both. In the DSv4 fp8 format that is 448 fp8 values, 7 e8m0
++        # scales for those values at block size 64, and 64 bf16 rotary
++        # channels, all packed as uint8.
++        return MLAAttentionSpec(
++            block_size=vllm_config.cache_config.block_size,
++            num_kv_heads=1,
++            head_size=align_to(448 + 7 + 64 * 2, 128),
++            dtype=torch.uint8,
++            tokens_per_state=self.compress_ratio,
++            alignment=None,
++        )
++
++    def _o_proj(self, o: torch.Tensor,
++                positions: torch.Tensor) -> torch.Tensor:
++        """Inverse-RoPE + wo_a (per-group bmm) + wo_b output projection."""
++        mesh = get_vllm_model_wrapper_context().mesh
++        # fused_reverse_rope_wo_a_projection assumes data parallelism for the
++        # attention layer.
++        z = jax.shard_map(
++            functools.partial(
++                fused_reverse_rope_wo_a_projection,
++                head_dim=self.head_dim,
++                inverse=True,
++                quantize_activations=True,
++            ),
++            mesh=mesh,
++            in_specs=(
++                P(ShardingAxisName.ATTN_DATA),  # o
++                P(ShardingAxisName.ATTN_DATA),  # positions
++                P(),  # cos_sin_cache (replicated)
++                P(),  # wo_a
++                P(),  # wo_a_scale
++            ),
++            out_specs=P(ShardingAxisName.ATTN_DATA),
++            check_vma=False,
++        )(
++            jax_view(o),
++            jax_view(positions),
++            jax_view(self.rotary_emb.cos_sin_cache),
++            jax_view(self.wo_a.weight),
++            jax_view(self.wo_a.weight_scale),
++        )
++
++        # wo_b projects back to hidden_size.
++        out = self.wo_b(torch_view(z))
++        if isinstance(out, tuple):
++            out = out[0]
++        return out
++
++    def attn_gemm(self, hidden_states: torch.Tensor):
++        """The input projections, in program order.
++
++        The CUDA layer runs the two light projections on auxiliary streams
++        while the heavy fused projection runs on the default stream. TPU has no
++        stream object, so they run in order and the XLA compiler schedules
++        them.
++        """
++        # MergedColumnParallelLinear returns (output, bias); bias is None.
++        qr_kv, _ = self.fused_wqa_wkv(hidden_states)
++
++        # V4 fused this projection into the TPU compress-and-store kernel and
++        # gave the compressor the hidden states. V4.1 pools two rows of the
++        # projection with a softmax gate over its own trailing channels, so the
++        # projection has to exist as a tensor before the compressor runs.
++        kv_score = None
++        if self.compressor is not None:
++            weight = self.compressor.fused_wkv_wgate.weight
++            # The compressor pools and normalizes in float32. Its epsilon is
++            # 1e-20, which underflows in bf16.
++            kv_score = torch.matmul(hidden_states.to(torch.float32),
++                                    weight.to(torch.float32).t())
++
++        indexer_weights = None
++        if self.indexer is not None:
++            # ReplicatedLinear returns (output, bias); bias is None.
++            indexer_weights, _ = self.indexer.weights_proj(hidden_states)
++
++        return qr_kv, kv_score, indexer_weights
++
++    def qnorm_rope(
++            self,
++            q: torch.Tensor,  # [num_tokens, n_local_heads, head_dim]
++            positions: torch.Tensor,  # [num_tokens], int64
++    ) -> torch.Tensor:
++        """Per-head RMSNorm (no weight) + GPT-J interleaved RoPE on q."""
++        mesh = get_vllm_model_wrapper_context().mesh
++        return torch_view(
++            sharded_rope(
++                rope_kernel.qnorm_rope,
++                mesh,
++                jax_view(q),
++                jax_view(positions),
++                jax_view(self.rotary_emb.cos_sin_cache),
++                eps=self.eps,
++            ))
++
++    def kv_rope(
++            self,
++            kv: torch.Tensor,  # [num_tokens, head_dim]
++            positions: torch.Tensor,  # [num_tokens], int64
++    ) -> torch.Tensor:
++        mesh = get_vllm_model_wrapper_context().mesh
++        return torch_view(
++            sharded_rope(
++                rope_kernel.rope,
++                mesh,
++                jax_view(kv),
++                jax_view(positions),
++                jax_view(self.rotary_emb.cos_sin_cache),
++            ))
++
++    def _topk_indices(self, qr, latent, indexer_weights, positions):
++        """The top-k indices this layer attends over.
++
++        An index source runs its indexer and publishes the result. Every other
++        compressed layer reads what the nearest index source below it
++        published. The layers run in order in one forward pass, so the source
++        always runs first.
++        """
++        if self.indexer is not None:
++            indices = self.indexer(qr, latent, indexer_weights, positions,
++                                   self.indexer_rotary_emb)
++            self._published_topk_indices = indices
++            return indices
++
++        if self.compress_ratio == 0:
++            return None
++
++        assert self.index_source_prefix is not None
++        source = self._static_forward_context[self.index_source_prefix]
++        indices = source._published_topk_indices
++        assert indices is not None, (
++            f"index source {self.index_source_prefix} published no top-k "
++            f"indices before layer {self.layer_id} read them")
++        return indices
++
++    def attention_impl(
++            self,
++            qr: torch.Tensor,
++            kv: torch.Tensor,
++            kv_score: torch.Tensor | None,
++            indexer_weights: torch.Tensor | None,
++            positions: torch.Tensor,
++    ) -> torch.Tensor:
++        """Query preparation, compression, indexing, then sparse attention.
++
++        The order matters. The compressor latent feeds the indexer keys, and
++        both cache writes must land before the sparse attention reads either
++        cache.
++        """
++        q = self.wq_b(qr).view(-1, self.n_local_heads, self.head_dim)
++        q = self.qnorm_rope(q, positions)
++        kv = self.kv_rope(kv, positions)
++
++        latent = None
++        if self.compressor is not None:
++            latent = self.compressor(kv_score, positions)
++
++        topk_indices = self._topk_indices(qr, latent, indexer_weights,
++                                          positions)
++
++        if self.compressor is not None:
++            self.compressor.insert_cache(latent, positions, self.rotary_emb)
++
++        return self.forward_mqa(q,
++                                kv,
++                                positions,
++                                None,
++                                topk_indices=topk_indices)
++
++    def forward_mqa(
++        self,
++        q: torch.Tensor,
++        kv: torch.Tensor,
++        positions: torch.Tensor,
++        output: torch.Tensor,  # Not used
++        *,
++        topk_indices: torch.Tensor | None,
++    ) -> torch.Tensor:
++        """The SWA cache update, then attention over SWA and compressed KV.
++
++        A ratio-0 layer has no compressed cache and stops after the sliding
++        window. Every other layer continues into the sparse kernel with the
++        top-k indices its index source published.
++        """
++        swa_only = self.compress_ratio == 0
++
++        wrapper_ctx = get_vllm_model_wrapper_context()
++        mesh = wrapper_ctx.mesh
++        attn_metadata = get_forward_context().attn_metadata
++        assert isinstance(attn_metadata, dict)
++
++        # --- SWA layer cache + metadata (always present)
++        swa_layer_name = self.swa_cache_layer.prefix
++        swa_attn_metadata = attn_metadata[swa_layer_name]
++        swa_cache_index = wrapper_ctx.layer_name_to_kvcache_index[
++            swa_layer_name]
++        sw_cache = wrapper_ctx.kv_caches[swa_cache_index]
++        attention_sinks = jax_view(self.attn_sink)
++
++        two_caches_same_buffer = False
++        if swa_only:
++            # The main cache operands are placeholders that the kernel below
++            # never reads on this path.
++            main_cache_nope = sw_cache
++            main_cache_rope = sw_cache
++            main_topk = swa_attn_metadata.seq_lens
++            main_page_indices = swa_attn_metadata.block_tables
++            main_cu_q_lens = swa_attn_metadata.query_start_loc
++            main_distribution = swa_attn_metadata.request_distribution
++        else:
++            assert topk_indices is not None
++            # A KV-source layer reads its own cache; a consumer reads the cache
++            # of the nearest KV source below it.
++            main_layer_name = self.compressed_cache_prefix
++            assert main_layer_name is not None
++            main_attn_metadata = attn_metadata[main_layer_name]
++            nope_index = wrapper_ctx.layer_name_to_kvcache_index[
++                main_layer_name]
++            rope_index = wrapper_ctx.layer_name_to_kvcache_index[
++                f"{main_layer_name}_rope"]
++            main_cache_nope = wrapper_ctx.kv_caches[nope_index]
++            main_cache_rope = wrapper_ctx.kv_caches[rope_index]
++            main_topk = jax_view(topk_indices)
++            main_page_indices = main_attn_metadata.block_tables
++            main_cu_q_lens = main_attn_metadata.query_start_loc
++            main_distribution = main_attn_metadata.request_distribution
++            # The SWA cache overlays a NoPE array. When it overlays the NoPE
++            # array this layer reads, the sparse kernel must see the copy the
++            # sliding-window kernel just wrote.
++            two_caches_same_buffer = (nope_index == swa_cache_index)
++
++        # All array inputs and outputs are sharded along the leading axis on
++        # ShardingAxisName.ATTN_DATA (caches on ShardingAxisName.BATCH);
++        # `attention_sinks` is replicated. The kernels run per-shard.
++        data_spec = P(ShardingAxisName.ATTN_DATA)
++        cache_spec = P(ShardingAxisName.BATCH)
++        in_specs = (
++            data_spec,  # q
++            data_spec,  # new_kv
++            cache_spec,  # sw_cache
++            data_spec,  # swa_kv_lens
++            data_spec,  # swa_page_indices
++            data_spec,  # swa_cu_q_lens
++            data_spec,  # swa_distribution
++            cache_spec,  # main_cache_nope
++            cache_spec,  # main_cache_rope
++            data_spec,  # main_topk
++            data_spec,  # main_page_indices
++            data_spec,  # main_cu_q_lens
++            data_spec,  # main_distribution
++            P(),  # attention_sinks (replicated)
++        )
++        out_specs = (
++            data_spec,  # attention output
++            cache_spec,  # updated swa cache
++        )
++
++        def _attention(q, new_kv, sw_cache, swa_kv_lens, swa_page_indices,
++                       swa_cu_q_lens, swa_distribution, main_cache_nope,
++                       main_cache_rope, main_topk, main_page_indices,
++                       main_cu_q_lens, main_distribution, attention_sinks):
++            swa_output, updated_sw_cache, swa_l, swa_m = (
++                mla_sliding_window_ragged_paged_attention(
++                    q=q,
++                    new_kv=new_kv,
++                    cache_kv=sw_cache,
++                    kv_lens=swa_kv_lens,
++                    page_indices=swa_page_indices,
++                    cu_q_lens=swa_cu_q_lens,
++                    distribution=swa_distribution,
++                    attention_sinks=attention_sinks,
++                    sm_scale=self.scale,
++                    sliding_window=self.window_size,
++                    logical_page_size=self.swa_cache_layer.block_size,
++                    # TODO: tune num_kv_pages_per_block & num_queries_per_block
++                    num_kv_pages_per_block=(2, 2, 2),
++                    num_queries_per_block=(1, 32, 32),
++                    q_compute_block_size=4,
++                    unnormalized_output=False if swa_only else True,
++                ))
++
++            if swa_only:
++                return swa_output, updated_sw_cache
++
++            if two_caches_same_buffer:
++                main_cache_nope = updated_sw_cache
++
++            # The sparse kernel gathers only the top-k KV states per query.
++            chunk_size = 64 if (q.shape[0] % 64 == 0) else None
++            if chunk_size is None:
++                # The kernel falls back to a single chunk of q.shape[0]; the
++                # batch size must divide it.
++                batch_size = _largest_divisor(q.shape[0], 16)
++            else:
++                batch_size = 16
++            output = sparse_ragged_paged_attention(
++                q=q,
++                cache_kv_nope=main_cache_nope,
++                cache_kv_rope=main_cache_rope,
++                topk_indices=main_topk,
++                page_indices=main_page_indices,
++                cu_q_lens=main_cu_q_lens,
++                distribution=main_distribution,
++                attention_sinks=attention_sinks,
++                swa_accumution=swa_output,
++                swa_l=swa_l,
++                swa_m=swa_m,
++                sm_scale=self.scale,
++                # TODO: tune attention_kernel_batch_size &
++                # gather_and_attention_chunk_size.
++                gather_and_attention_chunk_size=chunk_size,
++                attention_kernel_batch_size=batch_size,
++            )
++            return output, updated_sw_cache
++
++        output, updated_sw_cache = jax.shard_map(
++            _attention,
++            mesh=mesh,
++            in_specs=in_specs,
++            out_specs=out_specs,
++            check_vma=False,
++        )(
++            jax_view(q),
++            jax_view(kv),
++            sw_cache,
++            swa_attn_metadata.seq_lens,
++            swa_attn_metadata.block_tables,
++            swa_attn_metadata.query_start_loc,
++            swa_attn_metadata.request_distribution,
++            main_cache_nope,
++            main_cache_rope,
++            main_topk,
++            main_page_indices,
++            main_cu_q_lens,
++            main_distribution,
++            attention_sinks,
++        )
++
++        wrapper_ctx.kv_caches[swa_cache_index] = updated_sw_cache
++        return torch_view(output)
++
++    def forward(
++        self,
++        positions: torch.Tensor,
++        hidden_states: torch.Tensor,
++        llama_4_scaling: torch.Tensor | None = None,
++    ) -> torch.Tensor:
++        qr_kv, kv_score, indexer_weights = self.attn_gemm(hidden_states)
++        qr, kv = qr_kv.split([self.q_lora_rank, self.head_dim], dim=-1)
++        qr = self.q_norm(qr)
++        kv = self.kv_norm(kv)
++
++        attn_output = self.attention_impl(qr, kv, kv_score, indexer_weights,
++                                          positions)
++        return self._o_proj(attn_output, positions)
+diff --git a/tpu_inference/layers/vllm/custom_ops/experimental/deepseek_v41/deepseek_v41_compressor.py b/tpu_inference/layers/vllm/custom_ops/experimental/deepseek_v41/deepseek_v41_compressor.py
+new file mode 100644
+index 00000000..a8dbb402
+--- /dev/null
++++ b/tpu_inference/layers/vllm/custom_ops/experimental/deepseek_v41/deepseek_v41_compressor.py
+@@ -0,0 +1,429 @@
++# pytype: skip-file
++# Copyright 2026 Google LLC
++#
++# Licensed under the Apache License, Version 2.0 (the "License");
++# you may not use this file except in compliance with the License.
++# You may obtain a copy of the License at
++#
++#      http://www.apache.org/licenses/LICENSE-2.0
++#
++# Unless required by applicable law or agreed to in writing, software
++# distributed under the License is distributed on an "AS IS" BASIS,
++# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++# See the License for the specific language governing permissions and
++# limitations under the License.
++"""TPU-compatible DeepSeek-V4.1 KV compressor.
++
++The V4.1 compressor is not the V4 compressor with different arguments. It
++pools a group of ``compress_ratio`` tokens with a learned softmax gate, where
++V4 pooled with an absolute positional embedding, and it splits one call into
++two:
++
++* ``forward(kv_score, positions)`` saves the open group's rows, pools every
++  closed group, applies the RMSNorm and returns a BF16 latent.
++* ``insert_cache(latent, positions, rotary_emb)`` applies RoPE to the latent
++  and publishes it to the compressed KV cache.
++
++The attention layer runs the ``fused_wkv_wgate`` projection itself, so this
++module receives ``kv_score`` rather than ``hidden_states``. The V4 TPU
++compressor consumes ``hidden_states`` and fuses that projection into its
++Pallas kernel, which is one more reason the two cannot share code.
++
++Cache layouts this module expects the runner to allocate:
++
++* state cache, ratio 2 only: ``float32 [num_blocks, capacity, 2 * head_dim]``.
++  The first ``head_dim`` channels hold the KV row and the rest hold the gate
++  score. A request keeps one block. Position ``p`` occupies row
++  ``p % capacity``.
++* compressed KV cache, two ``uint8`` arrays. The main array holds a 512-byte
++  record for each state: 448 FP8 E4M3 values, then seven E8M0 scale bytes, one
++  for each block of 64 values. The companion ``{prefix}_rope`` array holds a
++  128-byte record: the 64 rotary channels in BF16.
++
++The packed record is not a choice about memory. It is the layout that the
++tuned ``sparse_ragged_paged_attention`` kernel reads, and writing anything else
++would mean writing a second sparse attention kernel.
++"""
++
++import jax
++import jax.numpy as jnp
++import torch
++from jax.sharding import PartitionSpec as P
++from torchax.interop import jax_view, torch_view
++from vllm.config import VllmConfig
++from vllm.forward_context import get_forward_context
++from vllm.models.deepseek_v4_1 import compressor as dsv41_compressor
++from vllm.models.deepseek_v4_1.compressor import (CompressorStateCache,
++                                                  DeepseekCompressor)
++from vllm.v1.kv_cache_interface import KVCacheSpec, SlidingWindowMLASpec
++
++from tpu_inference.layers.common.sharding import ShardingAxisName
++from tpu_inference.logger import init_logger
++from tpu_inference.models.vllm.vllm_model_wrapper_context import \
++    get_vllm_model_wrapper_context
++
++logger = init_logger(__name__)
++
++# The rotary channels of the compressed latent. The leading channels carry no
++# position, so their rotation is the identity.
++ROPE_CHANNELS = 64
++# The non-rotary channels, quantized to FP8 with one E8M0 scale for each block.
++NOPE_CHANNELS = 448
++QUANT_BLOCK = 64
++FP8_MAX = 448.0
++
++
++def quantize_e8m0(x: jax.Array, block: int) -> tuple[jax.Array, jax.Array]:
++    """FP8 E4M3 values with one E8M0 scale byte for each block of channels.
++
++    A reader recovers a value with ``value * 2 ** (scale_byte - 127)``.
++    """
++    rows = x.shape[0]
++    blocks = x.reshape(rows, -1, block)
++    amax = jnp.maximum(jnp.max(jnp.abs(blocks), axis=-1, keepdims=True), 1e-4)
++    exponent = jnp.ceil(jnp.log2(amax / FP8_MAX))
++    scaled = jnp.clip(blocks * jnp.exp2(-exponent), -FP8_MAX, FP8_MAX)
++    values = scaled.astype(jnp.float8_e4m3fn).view(jnp.uint8).reshape(rows, -1)
++    encoded = jnp.clip(exponent[..., 0] + 127.0, 0.0, 255.0).astype(jnp.uint8)
++    return values, encoded
++
++
++def _token_request_ids(query_start_loc: jax.Array,
++                       num_tokens: int) -> jax.Array:
++    """Request index of each packed token row.
++
++    vLLM's CUDA path receives this array in the metadata. The TPU metadata
++    carries only ``query_start_loc``, so derive it here.
++    """
++    tokens = jnp.arange(num_tokens, dtype=jnp.int32)
++    return (jnp.searchsorted(query_start_loc, tokens, side="right") -
++            1).astype(jnp.int32)
++
++
++def _rms_norm(x: jax.Array, weight: jax.Array, eps: float) -> jax.Array:
++    """RMSNorm over the last axis, accumulated in float32.
++
++    V4.1-Flash sets ``rms_norm_eps`` to 1e-20. A BF16 accumulation makes an
++    epsilon that small meaningless, so the caller must pass float32.
++    """
++    variance = jnp.mean(jnp.square(x), axis=-1, keepdims=True)
++    return x * jax.lax.rsqrt(variance + eps) * weight.astype(jnp.float32)
++
++
++def _gptj_rope(x: jax.Array, positions: jax.Array,
++               cos_sin_cache: jax.Array) -> jax.Array:
++    """GPT-J interleaved RoPE on the trailing ``ROPE_CHANNELS`` of ``x``.
++
++    ``cos_sin_cache`` is ``[max_position, 2 * ROPE_CHANNELS // 2]``: the first
++    half holds cosines and the second half holds sines.
++    """
++    half = ROPE_CHANNELS // 2
++    head = x[:, :-ROPE_CHANNELS]
++    tail = x[:, -ROPE_CHANNELS:].reshape(x.shape[0], half, 2)
++    cos_sin = cos_sin_cache[positions].astype(jnp.float32)
++    cos = cos_sin[:, :half, None]
++    sin = cos_sin[:, half:, None]
++    even = tail[:, :, 0:1]
++    odd = tail[:, :, 1:2]
++    rotated = jnp.concatenate([even * cos - odd * sin, odd * cos + even * sin],
++                              axis=-1)
++    return jnp.concatenate([head, rotated.reshape(x.shape[0], ROPE_CHANNELS)],
++                           axis=-1)
++
++
++def _paged_slots(block_tables: jax.Array, request_ids: jax.Array,
++                 row_indices: jax.Array, num_requests: int,
++                 page_size: int) -> jax.Array:
++    """Flat ``block * page_size + offset`` slot of each token row.
++
++    ``block_tables`` arrives flattened as ``num_requests *
++    max_blocks_per_request``.
++    """
++    max_blocks = block_tables.shape[0] // num_requests
++    blocks = block_tables.reshape(num_requests, max_blocks)
++    page = row_indices // page_size
++    page = jnp.clip(page, 0, max_blocks - 1)
++    return blocks[request_ids, page] * page_size + row_indices % page_size
++
++
++class VllmDeepseekV41CompressorStateCache(CompressorStateCache):
++    """TPU-compatible compressor state cache.
++
++    The base ``get_kv_cache_spec`` returns a ``CircularBufferSpec`` describing
++    the CUDA ring layout. The TPU runner plans its own arrays, so this override
++    reports the same capacity through the spec type the TPU KV-cache manager
++    already understands.
++    """
++
++    def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec:
++        del vllm_config
++        # The ring holds one block for each request, so a sliding window equal
++        # to the ring capacity gives the allocator the right per-request
++        # budget. The window has no attention meaning here.
++        return SlidingWindowMLASpec(
++            block_size=self.block_size,
++            num_kv_heads=1,
++            head_size=self.state_dim,
++            dtype=self.dtype,
++            sliding_window=self.block_size,
++            alignment=None,
++        )
++
++
++class VllmDeepseekV41Compressor(DeepseekCompressor):
++    """TPU-compatible DeepSeek-V4.1 compressor.
++
++    The base class dispatches to two Triton kernels that TPU does not have.
++    Both are reimplemented here in JAX. The pooling and the RMSNorm run in
++    float32, as the Triton kernels do.
++    """
++
++    def __init__(self, *args, **kwargs):
++        # The base ctor builds ``self.state_cache`` from the vLLM
++        # ``CompressorStateCache``. Temporarily rebind the symbol the base ctor
++        # references so it constructs the TPU subclass directly.
++        orig_state_cache = dsv41_compressor.CompressorStateCache
++        dsv41_compressor.CompressorStateCache = (
++            VllmDeepseekV41CompressorStateCache)
++        try:
++            super().__init__(*args, **kwargs)
++        finally:
++            dsv41_compressor.CompressorStateCache = orig_state_cache
++        self._wkv_wgate_transposed = False
++
++    def transpose_wkv_wgate(self) -> None:
++        """Stores ``fused_wkv_wgate.weight`` transposed, once, at load time.
++
++        vLLM lays linear weights out as [out_features, in_features]. The
++        attention layer multiplies ``hidden_states`` by this weight, so the
++        transposed layout removes a transpose from every step.
++        """
++        if self._wkv_wgate_transposed:
++            return
++        weight = self.fused_wkv_wgate.weight.data.t().contiguous()
++        self.fused_wkv_wgate.weight = torch.nn.Parameter(weight,
++                                                         requires_grad=False)
++        self._wkv_wgate_transposed = True
++
++    def forward(
++        self,
++        # [num_tokens, (2 if has_gate else 1) * head_dim], float32
++        kv_score: torch.Tensor,
++        # [num_tokens], int64
++        positions: torch.Tensor,
++    ) -> torch.Tensor | None:
++        """Save the open group's rows, pool every closed group, normalize.
++
++        Returns the BF16 latent. Rows that do not close a group hold values
++        that no consumer reads; ``insert_cache`` and the indexer both mask on
++        the same group-boundary test.
++        """
++        attn_metadata = get_forward_context().attn_metadata
++        if not isinstance(attn_metadata, dict):
++            return None
++
++        if self.state_cache is None:
++            return self._forward_ratio_one(kv_score)
++        return self._forward_ratio_two(kv_score, positions, attn_metadata)
++
++    def _forward_ratio_one(self, kv_score: torch.Tensor) -> torch.Tensor:
++        """Ratio 1: every token is its own group, so pooling is the identity."""
++        mesh = get_vllm_model_wrapper_context().mesh
++        data_spec = P(ShardingAxisName.ATTN_DATA)
++        eps = self.rms_norm_eps
++
++        def _normalize(kv_score, weight):
++            return _rms_norm(kv_score.astype(jnp.float32), weight,
++                             eps).astype(jnp.bfloat16)
++
++        latent = jax.shard_map(
++            _normalize,
++            mesh=mesh,
++            in_specs=(data_spec, P()),
++            out_specs=data_spec,
++            check_vma=False,
++        )(jax_view(kv_score), jax_view(self.norm.weight))
++        return torch_view(latent)
++
++    def _forward_ratio_two(self, kv_score: torch.Tensor,
++                           positions: torch.Tensor,
++                           attn_metadata: dict) -> torch.Tensor:
++        """Ratio 2: pool each closed pair with the gate, then refill the ring.
++
++        A group is the token pair ending at an odd position. The first token of
++        a chunk pools against a row the previous chunk left in the ring, so the
++        ring is read before it is written. JAX makes that ordering explicit:
++        the gather reads the array this call received and the scatter produces
++        a new one.
++        """
++        wrapper_ctx = get_vllm_model_wrapper_context()
++        mesh = wrapper_ctx.mesh
++        state_metadata = attn_metadata[self.state_cache.prefix]
++        state_index = wrapper_ctx.layer_name_to_kvcache_index[
++            self.state_cache.prefix]
++        state_cache = wrapper_ctx.kv_caches[state_index]
++
++        eps = self.rms_norm_eps
++        head_dim = self.head_dim
++        # A ratio above 2 would pool more than two rows, and the ring would
++        # have to supply more than one of them.
++        assert self.compress_ratio == 2
++
++        data_spec = P(ShardingAxisName.ATTN_DATA)
++        cache_spec = P(ShardingAxisName.BATCH)
++
++        def _pool(kv_score, positions, query_start_loc, block_tables, ring,
++                  weight):
++            num_tokens = kv_score.shape[0]
++            num_requests = query_start_loc.shape[0] - 1
++            capacity = ring.shape[1]
++            tokens = jnp.arange(num_tokens, dtype=jnp.int32)
++            request_ids = _token_request_ids(query_start_loc, num_tokens)
++            positions = positions.astype(jnp.int32)
++
++            # The ring row of the token before this one, in this token's own
++            # request. Only a chunk's first token reads it.
++            ring_slots = _paged_slots(block_tables, request_ids,
++                                      (positions - 1) % capacity, num_requests,
++                                      capacity)
++            previous_ring = ring.reshape(-1, ring.shape[-1])[ring_slots]
++
++            # The row before this one inside the chunk. Row 0 has none, and
++            # the chunk-start test below discards it.
++            previous_chunk = jnp.roll(kv_score, 1, axis=0)
++            is_chunk_start = tokens == query_start_loc[request_ids]
++            previous = jnp.where(is_chunk_start[:, None], previous_ring,
++                                 previous_chunk)
++
++            pair = jnp.stack([previous, kv_score.astype(jnp.float32)], axis=0)
++            gate = jax.nn.softmax(pair[:, :, head_dim:], axis=0)
++            pooled = jnp.sum(pair[:, :, :head_dim] * gate, axis=0)
++            latent = _rms_norm(pooled, weight, eps).astype(jnp.bfloat16)
++
++            # Refill the ring with the chunk's last ``capacity`` rows. Any
++            # earlier row is already consumed, and writing it would give two
++            # tokens the same ring slot.
++            chunk_end = query_start_loc[request_ids + 1]
++            store = (chunk_end - tokens) <= capacity
++            store_slots = _paged_slots(block_tables, request_ids,
++                                       positions % capacity, num_requests,
++                                       capacity)
++            flat_ring = ring.reshape(-1, ring.shape[-1])
++            # One row past the end absorbs the masked-out writes.
++            store_slots = jnp.where(store, store_slots, flat_ring.shape[0])
++            flat_ring = jnp.concatenate(
++                [flat_ring,
++                 jnp.zeros((1, flat_ring.shape[1]), flat_ring.dtype)],
++                axis=0)
++            flat_ring = flat_ring.at[store_slots].set(
++                kv_score.astype(flat_ring.dtype))
++            return latent, flat_ring[:-1].reshape(ring.shape)
++
++        latent, updated_ring = jax.shard_map(
++            _pool,
++            mesh=mesh,
++            in_specs=(data_spec, data_spec, data_spec, data_spec, cache_spec,
++                      P()),
++            out_specs=(data_spec, cache_spec),
++            check_vma=False,
++        )(
++            jax_view(kv_score),
++            jax_view(positions),
++            state_metadata.query_start_loc,
++            state_metadata.block_tables,
++            state_cache,
++            jax_view(self.norm.weight),
++        )
++        wrapper_ctx.kv_caches[state_index] = updated_ring
++        return torch_view(latent)
++
++    def insert_cache(
++        self,
++        latent: torch.Tensor | None,
++        positions: torch.Tensor,
++        rotary_emb,
++    ) -> None:
++        """Apply RoPE to the latent and publish it to the compressed KV cache.
++
++        Only a token that closes a group writes a row. The rotation uses the
++        position of the group's first token, which is what the CUDA kernel
++        does, so a group's key does not depend on where its boundary falls.
++        """
++        if latent is None:
++            return
++        attn_metadata = get_forward_context().attn_metadata
++        if not isinstance(attn_metadata, dict):
++            return
++
++        wrapper_ctx = get_vllm_model_wrapper_context()
++        mesh = wrapper_ctx.mesh
++        k_cache_metadata = attn_metadata[self.k_cache_prefix]
++        nope_index = wrapper_ctx.layer_name_to_kvcache_index[
++            self.k_cache_prefix]
++        rope_index = wrapper_ctx.layer_name_to_kvcache_index[
++            f"{self.k_cache_prefix}_rope"]
++        nope_cache = wrapper_ctx.kv_caches[nope_index]
++        rope_cache = wrapper_ctx.kv_caches[rope_index]
++
++        ratio = self.compress_ratio
++        data_spec = P(ShardingAxisName.ATTN_DATA)
++        cache_spec = P(ShardingAxisName.BATCH)
++
++        def _insert(latent, positions, query_start_loc, block_tables,
++                    cos_sin_cache, nope_cache, rope_cache):
++            num_tokens = latent.shape[0]
++            num_requests = query_start_loc.shape[0] - 1
++            positions = positions.astype(jnp.int32)
++            request_ids = _token_request_ids(query_start_loc, num_tokens)
++
++            # A latent stands for its whole group, so it rotates at the
++            # position of the group's first token.
++            rotated = _gptj_rope(latent.astype(jnp.float32),
++                                 positions // ratio * ratio, cos_sin_cache)
++            values, scales = quantize_e8m0(rotated[:, :NOPE_CHANNELS],
++                                           QUANT_BLOCK)
++
++            nope_record = jnp.zeros((num_tokens, nope_cache.shape[-1]),
++                                    jnp.uint8)
++            nope_record = nope_record.at[:, :NOPE_CHANNELS].set(values)
++            nope_record = nope_record.at[:, NOPE_CHANNELS:NOPE_CHANNELS +
++                                         scales.shape[1]].set(scales)
++            rope_record = rotated[:, NOPE_CHANNELS:].astype(
++                jnp.bfloat16).view(jnp.uint8)
++
++            closes_group = (positions + 1) % ratio == 0
++            states = positions // ratio
++
++            def _scatter(cache, record):
++                # One record occupies one row of the flattened cache, whatever
++                # the packing axes above it are.
++                page_size = cache.shape[1] * cache.shape[2]
++                flat = cache.reshape(-1, cache.shape[-1])
++                slots = _paged_slots(block_tables, request_ids, states,
++                                     num_requests, page_size)
++                slots = jnp.where(closes_group, slots, flat.shape[0])
++                flat = jnp.concatenate(
++                    [flat, jnp.zeros((1, flat.shape[1]), flat.dtype)], axis=0)
++                return flat.at[slots].set(record)[:-1].reshape(cache.shape)
++
++            return _scatter(nope_cache, nope_record), _scatter(
++                rope_cache, rope_record)
++
++        updated_nope, updated_rope = jax.shard_map(
++            _insert,
++            mesh=mesh,
++            in_specs=(data_spec, data_spec, data_spec, data_spec, P(),
++                      cache_spec, cache_spec),
++            out_specs=(cache_spec, cache_spec),
++            check_vma=False,
++        )(
++            jax_view(latent),
++            jax_view(positions),
++            k_cache_metadata.query_start_loc,
++            k_cache_metadata.block_tables,
++            jax_view(rotary_emb.cos_sin_cache),
++            nope_cache,
++            rope_cache,
++        )
++        wrapper_ctx.kv_caches[nope_index] = updated_nope
++        wrapper_ctx.kv_caches[rope_index] = updated_rope
+diff --git a/tpu_inference/layers/vllm/custom_ops/experimental/deepseek_v41/deepseek_v41_indexer.py b/tpu_inference/layers/vllm/custom_ops/experimental/deepseek_v41/deepseek_v41_indexer.py
+new file mode 100644
+index 00000000..b097b4db
+--- /dev/null
++++ b/tpu_inference/layers/vllm/custom_ops/experimental/deepseek_v41/deepseek_v41_indexer.py
+@@ -0,0 +1,283 @@
++# pytype: skip-file
++# Copyright 2026 Google LLC
++#
++# Licensed under the Apache License, Version 2.0 (the "License");
++# you may not use this file except in compliance with the License.
++# You may obtain a copy of the License at
++#
++#      http://www.apache.org/licenses/LICENSE-2.0
++#
++# Unless required by applicable law or agreed to in writing, software
++# distributed under the License is distributed on an "AS IS" BASIS,
++# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++# See the License for the specific language governing permissions and
++# limitations under the License.
++"""TPU-compatible DeepSeek-V4.1 Lightning Indexer.
++
++V4.1 derives the index key from the KV-source layer's compressor latent,
++``k = k_norm(wk(latent))``, where V4 gave the indexer its own compressor over
++the hidden states. So this indexer owns a small K-production step and does not
++own a compressor. Only a layer with ``owns_k`` writes keys; the other index
++sources read the keys that layer published.
++
++The paged K record keeps the layout the TPU ``streamindex_topk`` kernel reads:
++128 FP8 E4M3 value bytes, then one E8M0 scale byte, inside a 256-byte record.
++"""
++
++import functools
++from typing import Optional
++
++import jax
++import jax.numpy as jnp
++import torch
++import torch.nn as nn
++from jax.sharding import PartitionSpec as P
++from torchax.interop import jax_view, torch_view
++from vllm.forward_context import get_forward_context
++from vllm.models.deepseek_v4_1 import attention as dsv41_attention
++from vllm.models.deepseek_v4_1.attention import (DeepseekV4Indexer,
++                                                 DeepseekV4IndexerCache)
++from vllm.v1.kv_cache_interface import MLAAttentionSpec
++
++from tpu_inference.kernels.experimental.deepseek_v4.indexer.streamindex_topk import \
++    streamindex_topk
++from tpu_inference.kernels.experimental.deepseek_v4.rope import rope_quant
++from tpu_inference.layers.common.sharding import ShardingAxisName
++from tpu_inference.layers.vllm.custom_ops.experimental.deepseek_v41.deepseek_v41_compressor import (
++    _gptj_rope, _paged_slots, _rms_norm, _token_request_ids, quantize_e8m0)
++from tpu_inference.logger import init_logger
++from tpu_inference.models.vllm.vllm_model_wrapper_context import \
++    get_vllm_model_wrapper_context
++
++logger = init_logger(__name__)
++
++# The value bytes, the scale byte and the padding of one paged K record.
++INDEXER_RECORD_BYTES = 256
++
++
++def cdiv(a, b):
++    assert b != 0
++    return (a + b - 1) // b
++
++
++def align_to(x, a):
++    return cdiv(x, a) * a
++
++
++def fused_indexer_q_rope_quant(q: torch.Tensor, positions: torch.Tensor,
++                               rotary_emb: torch.nn.Module, mesh):
++    """Applies RoPE and dynamically quantizes the queries."""
++    data_spec = P(ShardingAxisName.ATTN_DATA)
++
++    q_quant_jax, q_scales_jax = jax.shard_map(
++        functools.partial(rope_quant, quant_dtype=jnp.float8_e4m3fn),
++        mesh=mesh,
++        in_specs=(data_spec, data_spec, P()),
++        out_specs=(data_spec, data_spec),
++        check_vma=False,
++    )(jax_view(q), jax_view(positions), jax_view(rotary_emb.cos_sin_cache))
++
++    # vLLM rounds the scale factors up to the next power of two. The standard
++    # division scale the kernel returns, one for each row, is enough here.
++    return torch_view(q_quant_jax), torch_view(q_scales_jax)
++
++
++class VllmDeepseekV41IndexerCache(DeepseekV4IndexerCache):
++    """TPU-compatible indexer KV cache.
++
++    The record layout is the V4 one, because the TPU top-k kernel that reads it
++    did not change. Only the compress ratios that select the page size did.
++    """
++
++    def get_kv_cache_spec(self, vllm_config):
++        return MLAAttentionSpec(
++            block_size=self.cache_config.block_size,
++            num_kv_heads=1,
++            head_size=align_to(128 + 1, 128),
++            dtype=torch.uint8,
++            tokens_per_state=self.compress_ratio,
++            alignment=None,
++        )
++
++
++class VllmDeepseekV41Indexer(DeepseekV4Indexer):
++    """TPU-compatible DeepSeek-V4.1 Lightning Indexer with StreamIndex.
++
++    ``forward`` returns the top-k indices rather than upstream's
++    ``(q, q_scale, weights)`` triple. Upstream splits those three values out so
++    a later ``indexer_op`` call can run them on another CUDA stream. TPU has no
++    stream to gain from that split, and the TPU attention layer calls this
++    method directly, so the whole indexer runs in one call. The V4 TPU indexer
++    makes the same deviation.
++    """
++
++    def __init__(self, *args, **kwargs):
++        # The base ctor builds ``self.k_cache`` from the vLLM upstream class.
++        # Temporarily rebind the module-level symbol the base ctor references
++        # so it constructs the TPU subclass directly. V4.1 takes the cache as
++        # an argument as well, so a caller that passes one must pass the TPU
++        # subclass itself.
++        orig_cache = dsv41_attention.DeepseekV4IndexerCache
++        dsv41_attention.DeepseekV4IndexerCache = VllmDeepseekV41IndexerCache
++        try:
++            super().__init__(*args, **kwargs)
++        finally:
++            dsv41_attention.DeepseekV4IndexerCache = orig_cache
++
++    def produce_k(
++        self,
++        latent: torch.Tensor | None,
++        positions: torch.Tensor,
++        rotary_emb: nn.Module,
++    ) -> None:
++        """Turn the compressor's pre-RoPE latent into paged index keys.
++
++        ``k_norm(wk(latent))`` at group-boundary tokens, rotated at the group's
++        first-token position and quantized into the indexer K cache. Rows that
++        do not close a group hold values that this method does not write.
++        """
++        attn_metadata = get_forward_context().attn_metadata
++        if not isinstance(attn_metadata, dict) or latent is None:
++            # Profile run: the indexer K cache is not bound yet.
++            return
++        assert self.owns_k
++
++        # ReplicatedLinear returns (output, bias); bias is None.
++        k_pre, _ = self.wk(latent)
++
++        wrapper_ctx = get_vllm_model_wrapper_context()
++        mesh = wrapper_ctx.mesh
++        cache_index = wrapper_ctx.layer_name_to_kvcache_index[
++            self.k_cache.prefix]
++        cache = wrapper_ctx.kv_caches[cache_index]
++        indexer_metadata = attn_metadata[self.k_cache.prefix]
++
++        ratio = self.compress_ratio
++        eps = self.k_norm.variance_epsilon
++        data_spec = P(ShardingAxisName.ATTN_DATA)
++        cache_spec = P(ShardingAxisName.BATCH)
++
++        def _store(k_pre, positions, query_start_loc, block_tables,
++                   cos_sin_cache, weight, cache):
++            num_tokens = k_pre.shape[0]
++            num_requests = query_start_loc.shape[0] - 1
++            positions = positions.astype(jnp.int32)
++            request_ids = _token_request_ids(query_start_loc, num_tokens)
++
++            # The reference rounds through BF16 after the norm and again after
++            # the rotation. Keep both, so the TPU keys match the reference
++            # bit for bit where the hardware allows it.
++            k = _rms_norm(k_pre.astype(jnp.float32), weight, eps)
++            k = k.astype(jnp.bfloat16).astype(jnp.float32)
++            k = _gptj_rope(k, positions // ratio * ratio, cos_sin_cache)
++            k = k.astype(jnp.bfloat16).astype(jnp.float32)
++
++            # One scale for the whole key, which is the record the TPU top-k
++            # kernel unpacks.
++            values, encoded = quantize_e8m0(k, k.shape[-1])
++            head_dim = values.shape[-1]
++            assert cache.shape[-1] == INDEXER_RECORD_BYTES
++            record = jnp.zeros((num_tokens, cache.shape[-1]), jnp.uint8)
++            record = record.at[:, :head_dim].set(values)
++            record = record.at[:, head_dim:head_dim + 1].set(encoded)
++
++            # The cache is uint8 (pages, rows, packing, record_bytes). One
++            # state occupies one record, so flatten every axis above the last.
++            page_size = cache.shape[1] * cache.shape[2]
++            flat = cache.reshape(-1, cache.shape[-1])
++            slots = _paged_slots(block_tables, request_ids, positions // ratio,
++                                 num_requests, page_size)
++            closes_group = (positions + 1) % ratio == 0
++            slots = jnp.where(closes_group, slots, flat.shape[0])
++            flat = jnp.concatenate(
++                [flat, jnp.zeros((1, flat.shape[1]), flat.dtype)], axis=0)
++            flat = flat.at[slots].set(record)
++            return flat[:-1].reshape(cache.shape)
++
++        wrapper_ctx.kv_caches[cache_index] = jax.shard_map(
++            _store,
++            mesh=mesh,
++            in_specs=(data_spec, data_spec, data_spec, data_spec, P(), P(),
++                      cache_spec),
++            out_specs=cache_spec,
++            check_vma=False,
++        )(
++            jax_view(k_pre),
++            jax_view(positions),
++            indexer_metadata.query_start_loc,
++            indexer_metadata.block_tables,
++            jax_view(rotary_emb.cos_sin_cache),
++            jax_view(self.k_norm.weight),
++            cache,
++        )
++
++    def forward(
++        self,
++        qr: torch.Tensor,
++        latent: Optional[torch.Tensor],
++        indexer_weights: torch.Tensor,
++        positions: torch.Tensor,
++        rotary_emb: nn.Module,
++        qr_scale: Optional[torch.Tensor] = None,
++    ):
++        assert qr_scale is None, "the TPU path does not fuse the query quant"
++        wrapper_ctx = get_vllm_model_wrapper_context()
++        mesh = wrapper_ctx.mesh
++
++        if self.owns_k:
++            # The key write must land before the top-k reads the cache.
++            self.produce_k(latent, positions, rotary_emb)
++
++        # ReplicatedLinear returns (output, bias); bias is None.
++        q, _ = self.wq_b(qr)
++        q = q.view(-1, self.n_head, self.head_dim)
++        q_quant, q_scales = fused_indexer_q_rope_quant(q, positions,
++                                                       rotary_emb, mesh)
++
++        # Fold the query quantization scales into the weights.
++        weights = (indexer_weights.to(q.dtype) * self.softmax_scale *
++                   (self.n_head**-0.5) * q_scales)
++
++        cache_index = wrapper_ctx.layer_name_to_kvcache_index[
++            self.k_cache.prefix]
++        kv_cache = wrapper_ctx.kv_caches[cache_index]
++        attn_metadata = get_forward_context().attn_metadata[
++            self.k_cache.prefix]
++
++        data_spec = P(ShardingAxisName.ATTN_DATA)
++        cache_spec = P(ShardingAxisName.BATCH)
++
++        def _streamindex_topk(q, indexer_weights, cache_kv, seq_lens,
++                              page_indices, cu_q_lens, distribution):
++            return streamindex_topk(
++                q=q,
++                indexer_weights=indexer_weights,
++                cache_kv=cache_kv,
++                seq_lens=seq_lens,
++                page_indices=page_indices,
++                cu_q_lens=cu_q_lens,
++                distribution=distribution,
++                k=self.topk_tokens,
++                compression_ratio=self.compress_ratio,
++                # TODO(hwanginho): Tune num_kv_pages_per_block,
++                # num_queries_per_block.
++                num_kv_pages_per_block=(3, 2, 2),
++                num_queries_per_block=(1, 128, 128),
++            )
++
++        return jax.shard_map(
++            _streamindex_topk,
++            mesh=mesh,
++            in_specs=(data_spec, data_spec, cache_spec, data_spec, data_spec,
++                      data_spec, data_spec),
++            out_specs=data_spec,
++            check_vma=False,
++        )(
++            jax_view(q_quant),
++            jax_view(weights),
++            kv_cache,
++            attn_metadata.seq_lens,
++            attn_metadata.block_tables,
++            attn_metadata.query_start_loc,
++            attn_metadata.request_distribution,
++        )
+diff --git a/tpu_inference/models/vllm/experimental/__init__.py b/tpu_inference/models/vllm/experimental/__init__.py
+index a22732f4..1c4252e5 100644
+--- a/tpu_inference/models/vllm/experimental/__init__.py
++++ b/tpu_inference/models/vllm/experimental/__init__.py
+@@ -19,6 +19,8 @@
+ _TPU_VLLM_MODELS = {
+     "DeepseekV4ForCausalLM":
+     "tpu_inference.models.vllm.experimental.deepseek_v4:DeepseekV4ForCausalLM",
++    "DeepseekV41ForCausalLM":
++    "tpu_inference.models.vllm.experimental.deepseek_v41:DeepseekV41LLMForCausalLM",
+ }
+ 
+ 
+diff --git a/tpu_inference/runner/kv_cache_manager.py b/tpu_inference/runner/kv_cache_manager.py
+index 6baff1cf..a840ecd8 100644
+--- a/tpu_inference/runner/kv_cache_manager.py
++++ b/tpu_inference/runner/kv_cache_manager.py
+@@ -28,6 +28,12 @@ from vllm.model_executor.layers.mla import MLAAttention
+ from vllm.models.deepseek_v4.attention import (DeepseekV4Attention,
+                                                DeepseekV4IndexerCache)
+ from vllm.models.deepseek_v4.compressor import CompressorStateCache
++# V4.1 defines its own attention and compressor classes under the same names.
++# Both families can be present, so both must be recognized.
++from vllm.models.deepseek_v4_1.attention import \
++    DeepseekV4Attention as DeepseekV41Attention
++from vllm.models.deepseek_v4_1.compressor import \
++    CompressorStateCache as DeepseekV41CompressorStateCache
+ from vllm.v1.attention.backend import AttentionType
+ from vllm.v1.attention.backends.mla.sparse_swa import DeepseekV4SWACache
+ from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
+@@ -69,12 +75,33 @@ DEFAULT_MAMBA_CHECKPOINT_BUDGET_MULTIPLIER = 2
+ def is_cache_for_ds_v4(attn_module: AttentionLayerBase) -> bool:
+     return isinstance(attn_module, DeepseekV4IndexerCache) or isinstance(
+         attn_module, DeepseekV4SWACache) or isinstance(
+-            attn_module, DeepseekV4Attention) or isinstance(
+-                attn_module, CompressorStateCache)
++            attn_module,
++            (DeepseekV4Attention, DeepseekV41Attention)) or isinstance(
++                attn_module,
++                (CompressorStateCache, DeepseekV41CompressorStateCache))
++
++
++# Architectures whose KV cache the DSv4 overlay planner owns. V4.1 keeps the
++# record layouts of V4 and changes only which layer holds each record, so both
++# go through the same planner.
++_DS_V4_ARCHITECTURES = ("DeepseekV4ForCausalLM", "DeepseekV41ForCausalLM")
+ 
+ 
+ def is_ds_v4(vllm_config):
+-    return "DeepseekV4ForCausalLM" in (vllm_config.model_config.architectures)
++    architectures = vllm_config.model_config.architectures
++    return any(arch in architectures for arch in _DS_V4_ARCHITECTURES)
++
++
++def is_ds_v41(vllm_config):
++    """Whether the model is V4.1 rather than V4.
++
++    V4.1 gives a compressed KV cache to its ``kv_source_layer_ids`` only, at
++    compress ratios 1 and 2. V4 gives one to every layer whose ratio is above
++    1, and uses ratio 4 for the layers that hold the split NoPE / RoPE record.
++    The planner needs the distinction because the ratio no longer identifies
++    the record layout.
++    """
++    return "DeepseekV41ForCausalLM" in vllm_config.model_config.architectures
+ 
+ 
+ class KVCacheManager:
+@@ -1297,6 +1324,12 @@ class KVCacheManager:
+                 f"{[group.layer_names for group in kv_cache_config.kv_cache_groups]}"
+             )
+ 
++        # V4 marks the layers that hold the split NoPE / RoPE record with
++        # compress ratio 4. V4.1 uses ratios 1 and 2 and marks the same layers
++        # by giving a compressed KV spec only to its kv sources, so every
++        # non-indexer MLA layer of a V4.1 model holds that record.
++        is_v41 = is_ds_v41(self.runner.vllm_config)
++
+         layer_to_index: dict[str, int] = {}
+         # CSA NoPE arrays, in layer order; the SWA caches and the HCA
+         # compressor states overlay these.
+@@ -1308,6 +1341,13 @@ class KVCacheManager:
+             spec = layer_name_to_spec[layer_name]
+             page_size = spec.num_states * common_utils.get_mesh_shape_product(
+                 self.runner.mesh, ShardingAxisName.KV_CONTEXT)
++            if page_size % self._DS_V4_KV_PACKING:
++                raise ValueError(
++                    "[kv-cache] DSv4 page size must be a multiple of the "
++                    f"{self._DS_V4_KV_PACKING}-slot row packing, or the RoPE "
++                    "and indexer arrays lose their last states without an "
++                    f"error: layer={layer_name}, page_size={page_size}, "
++                    f"spec={spec}")
+             if layer_name.endswith(self._DS_V4_INDEXER_CACHE_SUFFIX):
+                 # Lightning indexer: 128 fp8 values + 1 e8m0 scale per token,
+                 # padded to a 256B record; 4 tokens per row.
+@@ -1315,9 +1355,10 @@ class KVCacheManager:
+                          self._DS_V4_KV_PACKING, 256)
+                 _create_cache(shape, layer_name)
+                 layer_to_index[layer_name] = len(kv_caches) - 1
+-            elif getattr(spec, "tokens_per_state",
+-                         getattr(spec, "compress_ratio",
+-                                 1)) == self._DS_V4_CSA_COMPRESS_RATIO:
++            elif is_v41 or getattr(
++                    spec, "tokens_per_state",
++                    getattr(spec, "compress_ratio",
++                            1)) == self._DS_V4_CSA_COMPRESS_RATIO:
+                 # CSA is split across two arrays, for nope and rope respectively.
+                 shape = (num_blocks, page_size, self._DS_V4_KV_PACKING, 128)
+                 _create_cache(shape, layer_name)
+@@ -1339,10 +1380,12 @@ class KVCacheManager:
+ 
+         # Overlay swa_caches onto the CSA NoPE arrays.
+         if not csa_nope_indices:
++            expected = ("a kv-source layer" if is_v41 else
++                        f"a layer with compress_ratio="
++                        f"{self._DS_V4_CSA_COMPRESS_RATIO}")
+             raise ValueError(
+                 "[kv-cache] DSv4 model has no CSA layer to host the swa_caches"
+-                f" (compress_ratio={self._DS_V4_CSA_COMPRESS_RATIO}). MLA "
+-                f"layers={mla_layer_names}")
++                f" (expected {expected}). MLA layers={mla_layer_names}")
+         swa_host_indices = list(csa_nope_indices)
+         for group_swa_layers in swa_layer_groups:
+             for position, layer_name in enumerate(group_swa_layers):

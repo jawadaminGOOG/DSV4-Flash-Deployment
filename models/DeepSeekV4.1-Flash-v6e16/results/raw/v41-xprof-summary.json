@@ -1,0 +1,296 @@
+{
+  "decode_only": {
+    "phase": "decode_only",
+    "n_steps": 15,
+    "total_op_ms_per_step": 63.447,
+    "total_launches_per_step": 16589.1,
+    "categories": [
+      {
+        "category": "1. MoE Expert GEMM (MXFP4 VMEM Dequant + MXU)",
+        "ms_per_step": 20.173,
+        "share_pct": 31.79,
+        "launches_per_step": 78.1,
+        "avg_launch_us": 258.18,
+        "bytes_mb_per_step": 22520.16,
+        "achieved_bw_gbps": 1116.4,
+        "achieved_tflops": 210.54
+      },
+      {
+        "category": "2. ICI Collectives (All-Reduce & EP All-Gather)",
+        "ms_per_step": 15.699,
+        "share_pct": 24.74,
+        "launches_per_step": 330.2,
+        "avg_launch_us": 47.54,
+        "bytes_mb_per_step": 347.87,
+        "achieved_bw_gbps": 22.2,
+        "achieved_tflops": 0.0
+      },
+      {
+        "category": "3. Dense FP8 Projections (Attn QKV/O & Shared MLP)",
+        "ms_per_step": 8.193,
+        "share_pct": 12.91,
+        "launches_per_step": 895.2,
+        "avg_launch_us": 9.15,
+        "bytes_mb_per_step": 6634.53,
+        "achieved_bw_gbps": 809.8,
+        "achieved_tflops": 23.43
+      },
+      {
+        "category": "4. MoE Token Gather, Routing & SparseCore Offload",
+        "ms_per_step": 7.595,
+        "share_pct": 11.97,
+        "launches_per_step": 1492.1,
+        "avg_launch_us": 5.09,
+        "bytes_mb_per_step": 5451.85,
+        "achieved_bw_gbps": 717.8,
+        "achieved_tflops": 0.12
+      },
+      {
+        "category": "5. Lightning Indexer (conditional + approx_top_k)",
+        "ms_per_step": 4.957,
+        "share_pct": 7.81,
+        "launches_per_step": 186.9,
+        "avg_launch_us": 26.52,
+        "bytes_mb_per_step": 1435.8,
+        "achieved_bw_gbps": 289.7,
+        "achieved_tflops": 0.01
+      },
+      {
+        "category": "7. KV Compressor & CSA Cache Layout Reshapes/Copies",
+        "ms_per_step": 4.307,
+        "share_pct": 6.79,
+        "launches_per_step": 4170.3,
+        "avg_launch_us": 1.03,
+        "bytes_mb_per_step": 10345.95,
+        "achieved_bw_gbps": 2402.1,
+        "achieved_tflops": 0.0
+      },
+      {
+        "category": "6. CSA / SparseMLA & Sliding-Window Attention",
+        "ms_per_step": 1.407,
+        "share_pct": 2.22,
+        "launches_per_step": 392.6,
+        "avg_launch_us": 3.58,
+        "bytes_mb_per_step": 84.29,
+        "achieved_bw_gbps": 59.9,
+        "achieved_tflops": 0.0
+      },
+      {
+        "category": "8. mHC 4-Stream Hyper-Connections & RMSNorm",
+        "ms_per_step": 1.05,
+        "share_pct": 1.65,
+        "launches_per_step": 7235.5,
+        "avg_launch_us": 0.15,
+        "bytes_mb_per_step": 371.86,
+        "achieved_bw_gbps": 354.2,
+        "achieved_tflops": 1.57
+      },
+      {
+        "category": "9. Unfused Elementwise, Metadata & Host/RoPE Ops",
+        "ms_per_step": 0.067,
+        "share_pct": 0.11,
+        "launches_per_step": 1808.1,
+        "avg_launch_us": 0.04,
+        "bytes_mb_per_step": 7158.3,
+        "achieved_bw_gbps": 106485.7,
+        "achieved_tflops": 0.09
+      }
+    ]
+  },
+  "prefill_heavy": {
+    "phase": "prefill_heavy",
+    "n_steps": 15,
+    "total_op_ms_per_step": 258.846,
+    "total_launches_per_step": 19104.5,
+    "categories": [
+      {
+        "category": "2. ICI Collectives (All-Reduce & EP All-Gather)",
+        "ms_per_step": 109.787,
+        "share_pct": 42.41,
+        "launches_per_step": 328.5,
+        "avg_launch_us": 334.24,
+        "bytes_mb_per_step": 4903.18,
+        "achieved_bw_gbps": 44.7,
+        "achieved_tflops": 0.01
+      },
+      {
+        "category": "1. MoE Expert GEMM (MXFP4 VMEM Dequant + MXU)",
+        "ms_per_step": 65.131,
+        "share_pct": 25.16,
+        "launches_per_step": 74.8,
+        "avg_launch_us": 870.74,
+        "bytes_mb_per_step": 47148.33,
+        "achieved_bw_gbps": 723.9,
+        "achieved_tflops": 998.84
+      },
+      {
+        "category": "4. MoE Token Gather, Routing & SparseCore Offload",
+        "ms_per_step": 28.722,
+        "share_pct": 11.1,
+        "launches_per_step": 1468.5,
+        "avg_launch_us": 19.56,
+        "bytes_mb_per_step": 28501.42,
+        "achieved_bw_gbps": 992.3,
+        "achieved_tflops": 0.07
+      },
+      {
+        "category": "5. Lightning Indexer (conditional + approx_top_k)",
+        "ms_per_step": 14.126,
+        "share_pct": 5.46,
+        "launches_per_step": 174.5,
+        "avg_launch_us": 80.97,
+        "bytes_mb_per_step": 3666.25,
+        "achieved_bw_gbps": 259.5,
+        "achieved_tflops": 0.08
+      },
+      {
+        "category": "3. Dense FP8 Projections (Attn QKV/O & Shared MLP)",
+        "ms_per_step": 11.265,
+        "share_pct": 4.35,
+        "launches_per_step": 856.5,
+        "avg_launch_us": 13.15,
+        "bytes_mb_per_step": 9095.01,
+        "achieved_bw_gbps": 807.4,
+        "achieved_tflops": 225.09
+      },
+      {
+        "category": "7. KV Compressor & CSA Cache Layout Reshapes/Copies",
+        "ms_per_step": 10.711,
+        "share_pct": 4.14,
+        "launches_per_step": 5638.7,
+        "avg_launch_us": 1.9,
+        "bytes_mb_per_step": 17396.52,
+        "achieved_bw_gbps": 1624.2,
+        "achieved_tflops": 0.0
+      },
+      {
+        "category": "6. CSA / SparseMLA & Sliding-Window Attention",
+        "ms_per_step": 10.535,
+        "share_pct": 4.07,
+        "launches_per_step": 490.8,
+        "avg_launch_us": 21.46,
+        "bytes_mb_per_step": 1304.0,
+        "achieved_bw_gbps": 123.8,
+        "achieved_tflops": 0.01
+      },
+      {
+        "category": "8. mHC 4-Stream Hyper-Connections & RMSNorm",
+        "ms_per_step": 8.459,
+        "share_pct": 3.27,
+        "launches_per_step": 6990.0,
+        "avg_launch_us": 1.21,
+        "bytes_mb_per_step": 3506.68,
+        "achieved_bw_gbps": 414.5,
+        "achieved_tflops": 2.99
+      },
+      {
+        "category": "9. Unfused Elementwise, Metadata & Host/RoPE Ops",
+        "ms_per_step": 0.111,
+        "share_pct": 0.04,
+        "launches_per_step": 3082.3,
+        "avg_launch_us": 0.04,
+        "bytes_mb_per_step": 13106.46,
+        "achieved_bw_gbps": 117969.1,
+        "achieved_tflops": 0.06
+      }
+    ]
+  },
+  "v4_baseline_decode_only": {
+    "phase": "v4_decode_only",
+    "n_steps": 15,
+    "total_op_ms_per_step": 51.691,
+    "total_launches_per_step": 30869.7,
+    "categories": [
+      {
+        "category": "4. MoE Token Gather, Routing & SparseCore Offload",
+        "ms_per_step": 14.099,
+        "share_pct": 27.27,
+        "launches_per_step": 2200.4,
+        "avg_launch_us": 6.41,
+        "bytes_mb_per_step": 6407.27,
+        "achieved_bw_gbps": 454.5,
+        "achieved_tflops": 0.15
+      },
+      {
+        "category": "1. MoE Expert GEMM (MXFP4 VMEM Dequant + MXU)",
+        "ms_per_step": 11.925,
+        "share_pct": 23.07,
+        "launches_per_step": 81.7,
+        "avg_launch_us": 146.02,
+        "bytes_mb_per_step": 18886.53,
+        "achieved_bw_gbps": 1583.8,
+        "achieved_tflops": 529.59
+      },
+      {
+        "category": "3. Dense FP8 Projections (Attn QKV/O & Shared MLP)",
+        "ms_per_step": 7.169,
+        "share_pct": 13.87,
+        "launches_per_step": 1317.9,
+        "avg_launch_us": 5.44,
+        "bytes_mb_per_step": 7012.59,
+        "achieved_bw_gbps": 978.2,
+        "achieved_tflops": 43.64
+      },
+      {
+        "category": "2. ICI Collectives (All-Reduce & EP All-Gather)",
+        "ms_per_step": 5.883,
+        "share_pct": 11.38,
+        "launches_per_step": 399.1,
+        "avg_launch_us": 14.74,
+        "bytes_mb_per_step": 605.04,
+        "achieved_bw_gbps": 102.8,
+        "achieved_tflops": 0.01
+      },
+      {
+        "category": "6. CSA / SparseMLA & Sliding-Window Attention",
+        "ms_per_step": 4.585,
+        "share_pct": 8.87,
+        "launches_per_step": 1116.3,
+        "avg_launch_us": 4.11,
+        "bytes_mb_per_step": 16.08,
+        "achieved_bw_gbps": 3.5,
+        "achieved_tflops": 0.0
+      },
+      {
+        "category": "9. Unfused Elementwise, Metadata & Host/RoPE Ops",
+        "ms_per_step": 3.832,
+        "share_pct": 7.41,
+        "launches_per_step": 12545.5,
+        "avg_launch_us": 0.31,
+        "bytes_mb_per_step": 5352.2,
+        "achieved_bw_gbps": 1396.6,
+        "achieved_tflops": 0.01
+      },
+      {
+        "category": "7. KV Compressor & CSA Cache Layout Reshapes/Copies",
+        "ms_per_step": 3.354,
+        "share_pct": 6.49,
+        "launches_per_step": 12576.1,
+        "avg_launch_us": 0.27,
+        "bytes_mb_per_step": 9454.88,
+        "achieved_bw_gbps": 2818.8,
+        "achieved_tflops": 0.0
+      },
+      {
+        "category": "8. mHC 4-Stream Hyper-Connections & RMSNorm",
+        "ms_per_step": 0.454,
+        "share_pct": 0.88,
+        "launches_per_step": 451.3,
+        "avg_launch_us": 1.01,
+        "bytes_mb_per_step": 28.97,
+        "achieved_bw_gbps": 63.9,
+        "achieved_tflops": 0.1
+      },
+      {
+        "category": "5. Lightning Indexer (conditional + approx_top_k)",
+        "ms_per_step": 0.39,
+        "share_pct": 0.75,
+        "launches_per_step": 181.3,
+        "avg_launch_us": 2.15,
+        "bytes_mb_per_step": 11.76,
+        "achieved_bw_gbps": 30.2,
+        "achieved_tflops": 0.02
+      }
+    ]
+  }
+}

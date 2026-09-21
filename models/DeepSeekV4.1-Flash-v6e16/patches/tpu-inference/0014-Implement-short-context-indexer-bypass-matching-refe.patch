@@ -1,0 +1,83 @@
+From 335ae4a265b8d486c37b8c154e62f8a7aa0cf85a Mon Sep 17 00:00:00 2001
+From: Jawad Amin <jawadamin@google.com>
+Date: Thu, 17 Sep 2026 14:44:15 +0000
+Subject: [PATCH 14/18] Implement short-context indexer bypass matching
+ reference vLLM
+
+---
+ .../deepseek_v41/deepseek_v41_indexer.py      | 48 ++++++++++++-------
+ 1 file changed, 32 insertions(+), 16 deletions(-)
+
+diff --git a/tpu_inference/layers/vllm/custom_ops/experimental/deepseek_v41/deepseek_v41_indexer.py b/tpu_inference/layers/vllm/custom_ops/experimental/deepseek_v41/deepseek_v41_indexer.py
+index e174e554..7bede861 100644
+--- a/tpu_inference/layers/vllm/custom_ops/experimental/deepseek_v41/deepseek_v41_indexer.py
++++ b/tpu_inference/layers/vllm/custom_ops/experimental/deepseek_v41/deepseek_v41_indexer.py
+@@ -251,28 +251,43 @@ class VllmDeepseekV41Indexer(DeepseekV4Indexer):
+         cache_spec = P(ShardingAxisName.BATCH)
+ 
+         def _streamindex_topk(q, indexer_weights, cache_kv, seq_lens,
+-                              page_indices, cu_q_lens, distribution):
+-            return streamindex_topk(
+-                q=q,
+-                indexer_weights=indexer_weights,
+-                cache_kv=cache_kv,
+-                seq_lens=seq_lens,
+-                page_indices=page_indices,
+-                cu_q_lens=cu_q_lens,
+-                distribution=distribution,
+-                k=self.topk_tokens,
+-                compression_ratio=self.compress_ratio,
+-                # TODO(hwanginho): Tune num_kv_pages_per_block,
+-                # num_queries_per_block.
+-                num_kv_pages_per_block=(3, 2, 2),
+-                num_queries_per_block=(1, 128, 128),
++                              page_indices, cu_q_lens, distribution,
++                              local_positions):
++            # Short-context bypass: when candidate count <= topk_tokens for all
++            # tokens in this shard, every candidate is selected. Matching
++            # reference vllm deepseek_v4_1/attention.py:1170-1192 and DeepSeek
++            # model.py:578, return sequential states [0 .. num_compressed-1, -1 .. -1].
++            num_compressed = (local_positions[:, None] +
++                              1) // self.compress_ratio
++            offsets = jnp.arange(self.topk_tokens, dtype=jnp.int32)[None, :]
++            short_topk = jnp.where(offsets < num_compressed, offsets, -1)
++
++            use_streamindex = jnp.any(num_compressed > self.topk_tokens)
++            return lax.cond(
++                use_streamindex,
++                lambda: streamindex_topk(
++                    q=q,
++                    indexer_weights=indexer_weights,
++                    cache_kv=cache_kv,
++                    seq_lens=seq_lens,
++                    page_indices=page_indices,
++                    cu_q_lens=cu_q_lens,
++                    distribution=distribution,
++                    k=self.topk_tokens,
++                    compression_ratio=self.compress_ratio,
++                    # TODO(hwanginho): Tune num_kv_pages_per_block,
++                    # num_queries_per_block.
++                    num_kv_pages_per_block=(3, 2, 2),
++                    num_queries_per_block=(1, 128, 128),
++                ),
++                lambda: short_topk,
+             )
+ 
+         return jax.shard_map(
+             _streamindex_topk,
+             mesh=mesh,
+             in_specs=(data_spec, data_spec, cache_spec, data_spec, data_spec,
+-                      data_spec, data_spec),
++                      data_spec, data_spec, data_spec),
+             out_specs=data_spec,
+             check_vma=False,
+         )(
+@@ -283,4 +298,5 @@ class VllmDeepseekV41Indexer(DeepseekV4Indexer):
+             attn_metadata.block_tables,
+             attn_metadata.query_start_loc,
+             attn_metadata.request_distribution,
++            jax_view(positions),
+         )
+-- 
+2.55.0.1082.g2b9226bbc0-goog
+

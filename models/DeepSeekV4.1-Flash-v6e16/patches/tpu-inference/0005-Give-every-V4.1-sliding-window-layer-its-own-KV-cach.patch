@@ -1,0 +1,1831 @@
+From 71f8cd1428888ef30ff81e833e5065b3da7235b5 Mon Sep 17 00:00:00 2001
+From: Jawad Amin <jawadamin@google.com>
+Date: Sat, 12 Sep 2026 07:53:13 +0000
+Subject: [PATCH 5/8] Give every V4.1 sliding-window layer its own KV cache
+ array
+
+V4 lets a sliding-window layer share a cache array with a compressed
+NoPE layer. V4.1 cannot. Its sparse attention kernel reads the NoPE
+array outside the block table on purpose: the kernel gives every
+unfilled top-k slot a pseudo-random page and offset, so a padded gather
+spreads across the array instead of hitting one row. Those reads can
+land on any row, so the array must hold NoPE records and nothing else.
+
+A sliding-window row is BF16. Its bytes decode as an E8M0 scale of
+2 ** (byte - 127), which reaches 2e33, and the byte 0xFF decodes as a
+nan. The kernel comment at sparse_mla.py already names this hazard.
+
+Add two instruments as well:
+
+- The attention layer prints a nan flag, an inf flag and a magnitude for
+  each intermediate tensor when DSV41_TRACE_LAYER_STATS is 1.
+- The model reports every declared parameter that no checkpoint tensor
+  filled. The vLLM loader checks the checkpoint side only, so a
+  parameter the checkpoint never names keeps the arbitrary bit pattern
+  that torch.empty returned.
+
+Cost: four more cache arrays, about 283 MiB per chip on a v6e-16.
+---
+ tpu_inference/FORK_HEAD                       |   1 +
+ tpu_inference/kernels/megablox/gmm_v2.py      | 113 +++++++-
+ tpu_inference/layers/common/fused_moe_gmm.py  |  24 ++
+ .../common/process_weights/moe_weights.py     |  44 ++-
+ .../layers/common/quantization/__init__.py    |  16 ++
+ .../deepseek_v41/deepseek_v41_attention.py    |  67 ++++-
+ .../deepseek_v41/deepseek_v41_compressor.py   |  21 +-
+ .../vllm/process_weights/cleanup_sharding.py  |  24 +-
+ .../layers/vllm/quantization/mxfp4.py         | 108 +++++++-
+ .../models/vllm/experimental/deepseek_v41.py  | 223 ++++++++++++++-
+ .../vllm/experimental/engram_host_lookup.py   | 256 ++++++++++++++++++
+ .../models/vllm/vllm_model_wrapper.py         |  81 +++++-
+ .../models/vllm/vllm_model_wrapper_context.py |  17 ++
+ tpu_inference/runner/compilation_manager.py   |  23 ++
+ tpu_inference/runner/kv_cache_manager.py      |  63 ++++-
+ tpu_inference/runner/tpu_runner.py            |  85 ++++++
+ 16 files changed, 1111 insertions(+), 55 deletions(-)
+ create mode 100644 tpu_inference/FORK_HEAD
+ create mode 100644 tpu_inference/models/vllm/experimental/engram_host_lookup.py
+
+diff --git a/tpu_inference/FORK_HEAD b/tpu_inference/FORK_HEAD
+new file mode 100644
+index 00000000..dffc1ad3
+--- /dev/null
++++ b/tpu_inference/FORK_HEAD
+@@ -0,0 +1 @@
++9ed9c57328fb7cea44cd808ad9c8b3a5ff10573f
+diff --git a/tpu_inference/kernels/megablox/gmm_v2.py b/tpu_inference/kernels/megablox/gmm_v2.py
+index 60345f18..12dc476e 100644
+--- a/tpu_inference/kernels/megablox/gmm_v2.py
++++ b/tpu_inference/kernels/megablox/gmm_v2.py
+@@ -118,6 +118,55 @@ def align_to(x, a):
+     return pl.cdiv(x, a) * a
+ 
+ 
++# The MXFP4 encoding. The right-hand side holds an E2M1 code in `int4` storage,
++# and its scale holds an E8M0 exponent in `uint8` storage. A TPU generation
++# without an FP4 matrix unit cannot lower a `float4_e2m1fn` vector, and holding
++# the same bits in `int4` keeps the four-bit footprint and lowers everywhere.
++MXFP4_ENCODING = "mxfp4"
++
++# E8M0 stores an exponent and no mantissa, biased by 127.
++_E8M0_EXPONENT_BIAS = 127
++
++
++def decode_e2m1(code: jax.Array, dtype: jnp.dtype) -> jax.Array:
++    """Return the E2M1 value of a four-bit code held in `int4`.
++
++    The code carries the FP4 bit pattern, so the sign bit of the `int4` is the
++    sign of the value, and the low three bits select one of eight magnitudes.
++    Two's complement makes the sign test a comparison against zero.
++    """
++    wide = code.astype(jnp.int32)
++    index = jax.lax.bitwise_and(wide, 7)
++    # The first five magnitudes are half the index. The last three are not.
++    magnitude = 0.5 * index.astype(jnp.float32)
++    magnitude = jnp.where(index == 5, 3.0, magnitude)
++    magnitude = jnp.where(index == 6, 4.0, magnitude)
++    magnitude = jnp.where(index == 7, 6.0, magnitude)
++    return jnp.where(wide < 0, -magnitude, magnitude).astype(dtype)
++
++
++def infer_rhs_encoding(rhs: jax.Array,
++                       rhs_scale: jax.Array | None) -> str | None:
++    """Return the encoding that the rhs storage and its scale dtype imply.
++
++    A `uint8` scale holds an E8M0 exponent, and MXFP4 is the only format that
++    uses one. Every other quantized weight carries a floating scale. So a
++    four-bit weight with a `uint8` scale is MXFP4 and nothing else.
++    """
++    if rhs_scale is None:
++        return None
++    if (rhs_scale.dtype == jnp.uint8
++            and jax.dtypes.itemsize_bits(rhs.dtype) == 4):
++        return MXFP4_ENCODING
++    return None
++
++
++def decode_e8m0(scale: jax.Array, dtype: jnp.dtype) -> jax.Array:
++    """Return the value of an E8M0 scale held in `uint8`."""
++    exponent = scale.astype(jnp.float32) - _E8M0_EXPONENT_BIAS
++    return jnp.exp2(exponent).astype(dtype)
++
++
+ # Define data classes.
+ 
+ 
+@@ -218,6 +267,12 @@ class InputConfigs:
+     dtype: jnp.dtype
+     has_bias: bool = False
+     has_scale: bool = False
++    # `MXFP4_ENCODING` when the four-bit storage holds E2M1 codes. `None` when
++    # the storage holds plain values.
++    encoding: str | None = None
++    # `uint8` when the scale holds an E8M0 exponent that the kernel must decode.
++    # A floating dtype means the scale already holds its own value.
++    scale_dtype: jnp.dtype | None = None
+ 
+     @property
+     def should_dequantize_before_matmul(self) -> bool:
+@@ -422,10 +477,25 @@ def inner_kernel(
+         rhs_tile_n = tiled_rhs.shape[1]
+         rhs_qbs = cfgs.rhs_cfgs.quant_block_size
+         if cfgs.rhs_cfgs.should_dequantize_before_matmul:
+-            tiled_rhs_scale = tiled_rhs_ref.get_scale(
+-                replicate_size=rhs_qbs).astype(cfgs.lhs_cfgs.dtype)
+             num_blocks = cfgs.num_quant_blocks_per_tile_k
+-            tiled_rhs_dequant = tiled_rhs.astype(cfgs.lhs_cfgs.dtype).reshape(
++            if cfgs.rhs_cfgs.encoding == MXFP4_ENCODING:
++                tiled_rhs_value = decode_e2m1(tiled_rhs, cfgs.lhs_cfgs.dtype)
++            else:
++                tiled_rhs_value = tiled_rhs.astype(cfgs.lhs_cfgs.dtype)
++            if cfgs.rhs_cfgs.scale_dtype == jnp.uint8:
++                # An E8M0 scale holds an exponent and no mantissa. Decode it on
++                # the compact block shape, before the broadcast, so the kernel
++                # computes one exponent for each block and not one for each
++                # weight.
++                compact_scale = decode_e8m0(tiled_rhs_ref.get_scale(),
++                                            cfgs.lhs_cfgs.dtype)
++                tiled_rhs_scale = jnp.broadcast_to(
++                    compact_scale, (num_blocks, rhs_qbs, rhs_tile_n))
++            else:
++                # Perform zero-stride load for efficient sublane broadcasting.
++                tiled_rhs_scale = tiled_rhs_ref.get_scale(
++                    replicate_size=rhs_qbs).astype(cfgs.lhs_cfgs.dtype)
++            tiled_rhs_dequant = tiled_rhs_value.reshape(
+                 num_blocks, rhs_qbs, rhs_tile_n)
+             tiled_rhs_dequant = tiled_rhs_dequant * tiled_rhs_scale
+             tiled_rhs = tiled_rhs_dequant.reshape(cfgs.tiles.tile_k,
+@@ -1151,6 +1221,7 @@ def make_gmm_configs(
+     maybe_quantize_lhs: bool,
+     zero_initialize: bool,
+     fuse_act: str | None = None,
++    rhs_encoding: str | None = None,
+ ):
+     """Fills the GMM config for the GMM kernel."""
+ 
+@@ -1173,8 +1244,33 @@ def make_gmm_configs(
+         dtype=rhs.dtype,
+         has_bias=rhs_bias is not None,
+         has_scale=has_scale,
++        encoding=rhs_encoding,
++        scale_dtype=None if rhs_scale is None else rhs_scale.dtype,
+     )
+ 
++    if rhs_encoding == MXFP4_ENCODING:
++        # The decode runs in the branch that dequantizes before the matmul.
++        # Any other branch reads the four-bit storage as a plain integer, which
++        # returns wrong numbers instead of an error, so refuse it here.
++        if not rhs_cfgs.should_dequantize_before_matmul:
++            mxu_size = pltpu.get_tpu_info().mxu_column_size
++            raise ValueError(
++                f"{MXFP4_ENCODING} needs a scale block smaller than the matrix "
++                f"unit column size {mxu_size}, and this one is {block_size}. "
++                "Pass one scale for each block of 32, the block size the MXFP4 "
++                "format defines.")
++        if jax.dtypes.itemsize_bits(rhs.dtype) != 4:
++            raise ValueError(
++                f"{MXFP4_ENCODING} needs four-bit rhs storage, not {rhs.dtype}."
++            )
++        # A `uint8` scale holds a raw E8M0 exponent and the kernel decodes it.
++        # A floating scale already holds its own value and needs no decode.
++        if (rhs_scale.dtype != jnp.uint8
++                and not jnp.issubdtype(rhs_scale.dtype, jnp.floating)):
++            raise ValueError(
++                f"{MXFP4_ENCODING} needs a uint8 E8M0 scale or a floating "
++                f"scale, not {rhs_scale.dtype}.")
++
+     lhs_q_dtype = None
+     if maybe_quantize_lhs and rhs_cfgs.should_dequantize_after_matmul:
+         # Choose lhs quantization dtype based on TPU hardware support.
+@@ -1251,6 +1347,7 @@ def get_metadata(cfgs: GmmConfigs) -> dict[str, str | int | float]:
+     "maybe_quantize_lhs",
+     "zero_initialize",
+     "fuse_act",
++    "rhs_encoding",
+ ])
+ def gmm_v2(
+     lhs: jax.Array,  # [size_m, size_k]
+@@ -1269,6 +1366,7 @@ def gmm_v2(
+     maybe_quantize_lhs: bool = True,
+     zero_initialize: bool = True,
+     fuse_act: str | None = None,
++    rhs_encoding: str | None = None,
+ ) -> jax.Array:
+     """GMM kernel implemented with emit_pipeline.
+ 
+@@ -1291,6 +1389,8 @@ def gmm_v2(
+         maybe_quantize_lhs: Quantize lhs if set to True and rhs is quantized.
+         zero_initialize: Whether to initialize unvisited output elements to zero.
+         fuse_act: Activation function to fuse with GMM, None if no fusion.
++        rhs_encoding: `MXFP4_ENCODING` when rhs holds E2M1 codes in four-bit
++          storage and rhs_scale holds E8M0 exponents. None for plain values.
+ 
+     Returns:
+         Output of shape [size_m, size_n].
+@@ -1321,6 +1421,7 @@ def gmm_v2(
+         maybe_quantize_lhs=maybe_quantize_lhs,
+         zero_initialize=zero_initialize,
+         fuse_act=fuse_act,
++        rhs_encoding=rhs_encoding,
+     )
+     dims = cfgs.dims
+     tiles = cfgs.tiles
+@@ -1328,7 +1429,11 @@ def gmm_v2(
+     # Prepare block specs.
+     rhs_scale_spec = rhs_bias_spec = None
+     if rhs_scale is not None:
+-        rhs_scale = rhs_scale.astype(jnp.float32)
++        # Keep an E8M0 scale in its own one-byte storage. A cast to float32 here
++        # would build a copy four times the size in HBM on every call, and the
++        # kernel decodes the exponent itself.
++        if rhs_scale.dtype != jnp.uint8:
++            rhs_scale = rhs_scale.astype(jnp.float32)
+         rhs_scale_spec = pl.BlockSpec(memory_space=pltpu.HBM)
+     if rhs_bias is not None:
+         rhs_bias = rhs_bias.astype(jnp.float32)
+diff --git a/tpu_inference/layers/common/fused_moe_gmm.py b/tpu_inference/layers/common/fused_moe_gmm.py
+index a6dcc548..7b4b306c 100644
+--- a/tpu_inference/layers/common/fused_moe_gmm.py
++++ b/tpu_inference/layers/common/fused_moe_gmm.py
+@@ -100,6 +100,22 @@ def apply_scoring_fn(scoring_fn: str, x: jax.Array) -> jax.Array:
+                 f"FusedMoE does not support {scoring_fn} scoring function")
+ 
+ 
++def rhs_encoding(rhs, rhs_scale):
++    """Return the encoding that the rhs storage and its scale dtype imply.
++
++    A uint8 scale holds an E8M0 exponent, and MXFP4 is the only format that
++    uses one. Every other quantized weight carries a floating scale. So a
++    four-bit weight with a uint8 scale is MXFP4 and nothing else, and the
++    kernel has to decode both the code and the exponent.
++    """
++    if rhs_scale is None or rhs_scale.dtype != jnp.uint8:
++        return None
++    if jax.dtypes.itemsize_bits(rhs.dtype) != 4:
++        raise ValueError(
++            f"a uint8 E8M0 scale needs four-bit rhs storage, not {rhs.dtype}.")
++    return "mxfp4"
++
++
+ def gmm_wrapper(lhs,
+                 rhs,
+                 rhs_scale,
+@@ -108,6 +124,13 @@ def gmm_wrapper(lhs,
+                 group_offset,
+                 fuse_act=None,
+                 preferred_element_type=None):
++    extra = {}
++    # Pass the encoding only when there is one, so an installation whose
++    # gmm_v2 predates the MXFP4 path keeps working for every other format and
++    # raises a TypeError for this one instead of returning wrong numbers.
++    encoding = rhs_encoding(rhs, rhs_scale)
++    if encoding is not None:
++        extra["rhs_encoding"] = encoding
+     gmm_res = gmm_v2(
+         lhs=lhs,
+         rhs=rhs,
+@@ -118,6 +141,7 @@ def gmm_wrapper(lhs,
+         zero_initialize=False,
+         fuse_act=fuse_act,
+         preferred_element_type=preferred_element_type,
++        **extra,
+     )
+     return gmm_res
+ 
+diff --git a/tpu_inference/layers/common/process_weights/moe_weights.py b/tpu_inference/layers/common/process_weights/moe_weights.py
+index 85753d26..97003aa6 100644
+--- a/tpu_inference/layers/common/process_weights/moe_weights.py
++++ b/tpu_inference/layers/common/process_weights/moe_weights.py
+@@ -272,6 +272,8 @@ def process_moe_weights(
+     w13_reorder_size: int | None = None,
+     w13_interleave: bool = False,
+     disable_weight_requantization: bool = False,
++    keep_scale_dtype: bool = False,
++    compact_scale: bool = False,
+ ) -> FusedMoEWeights:
+     """Process fused moe weights to a layout that moe backend expects.
+ 
+@@ -287,6 +289,17 @@ def process_moe_weights(
+             we uninterleave so that first half is w1 and second half is w3.
+         disable_weight_requantization: whether to keep scales broad for GMM
+             setups.
++        keep_scale_dtype: keep the scale in the dtype it arrives in. Set this
++            when the scale holds a code that the kernel decodes, such as an
++            E8M0 exponent in uint8 storage. A cast to float32 would read that
++            code as a plain number and would also make the resident scale four
++            times larger.
++        compact_scale: drop the broadcast axis of the block scale, so the shape
++            is (experts, in_dim // block_size, out_dim). A TPU packs an 8-bit
++            type four to a word along the second-minor axis, and that axis is
++            the broadcast axis, so a uint8 scale otherwise reserves four bytes
++            for each byte it holds. The GMM kernel accepts both shapes and adds
++            the axis back in VMEM.
+ 
+     Returns:
+         MoE weights that are processed for specified backend.
+@@ -331,12 +344,14 @@ def process_moe_weights(
+     if w13_weight_scale is not None:
+         # For block scales (experts, out_blocks, in_blocks), we need to maintain
+         # the block dims
+-        w13_weight_scale = w13_weight_scale.astype(jnp.float32)
++        if not keep_scale_dtype:
++            w13_weight_scale = w13_weight_scale.astype(jnp.float32)
+         w13_weight_scale = jnp.swapaxes(w13_weight_scale, 1, 2)
+         w13_weight_scale = jnp.expand_dims(w13_weight_scale, 2)
+ 
+     if w2_weight_scale is not None:
+-        w2_weight_scale = w2_weight_scale.astype(jnp.float32)
++        if not keep_scale_dtype:
++            w2_weight_scale = w2_weight_scale.astype(jnp.float32)
+         w2_weight_scale = jnp.swapaxes(w2_weight_scale, 1, 2)
+         w2_weight_scale = jnp.expand_dims(w2_weight_scale, 2)
+ 
+@@ -539,6 +554,14 @@ def process_moe_weights(
+     if w2_weight_scale is not None:
+         w2_weight_scale = jnp.array(w2_weight_scale)
+ 
++    # Drop the broadcast axis last, so every step above keeps the shape it
++    # expects and only the resident array changes.
++    if compact_scale:
++        if w13_weight_scale is not None:
++            w13_weight_scale = jnp.squeeze(w13_weight_scale, axis=2)
++        if w2_weight_scale is not None:
++            w2_weight_scale = jnp.squeeze(w2_weight_scale, axis=2)
++
+     return FusedMoEWeights(
+         w13_weight=w13_weight,
+         w13_weight_scale=w13_weight_scale,
+@@ -615,23 +638,32 @@ def shard_moe_weights(
+ 
+     weight_shardings = _get_moe_weight_shardings(weights, moe_backend, mesh)
+ 
++    def scale_layout(scale, default_rank: int) -> Layout:
++        """Return a major-to-minor layout for the rank the scale really has.
++
++        A block scale carries a broadcast axis in most setups and drops it in
++        the compact setup, so the rank is not fixed.
++        """
++        rank = default_rank if scale is None else scale.ndim
++        return Layout(tuple(range(rank)))
++
+     match moe_backend:
+         case MoEBackend.FUSED_MOE:
+             weight_layouts = FusedMoEWeights(
+                 w13_weight=Layout((0, 1, 2, 3)),
+-                w13_weight_scale=Layout((0, 1, 2, 3, 4)),
++                w13_weight_scale=scale_layout(weights.w13_weight_scale, 5),
+                 w13_bias=Layout((0, 1, 2, 3)),
+                 w2_weight=Layout((0, 1, 2)),
+-                w2_weight_scale=Layout((0, 1, 2, 3)),
++                w2_weight_scale=scale_layout(weights.w2_weight_scale, 4),
+                 w2_bias=Layout((0, 1, 2)),
+             )
+         case MoEBackend.GMM_TP | MoEBackend.GMM_EP:
+             weight_layouts = FusedMoEWeights(
+                 w13_weight=Layout((0, 1, 2)),
+-                w13_weight_scale=Layout((0, 1, 2, 3)),
++                w13_weight_scale=scale_layout(weights.w13_weight_scale, 4),
+                 w13_bias=Layout((0, 1, 2)),
+                 w2_weight=Layout((0, 1, 2)),
+-                w2_weight_scale=Layout((0, 1, 2, 3)),
++                w2_weight_scale=scale_layout(weights.w2_weight_scale, 4),
+                 w2_bias=Layout((0, 1, 2)),
+             )
+ 
+diff --git a/tpu_inference/layers/common/quantization/__init__.py b/tpu_inference/layers/common/quantization/__init__.py
+index ac57e424..cbfb10dc 100644
+--- a/tpu_inference/layers/common/quantization/__init__.py
++++ b/tpu_inference/layers/common/quantization/__init__.py
+@@ -61,6 +61,22 @@ def u8_unpack_e2m1(u8_packed_e2m1: jax.Array) -> jax.Array:
+     return jnp.reshape(e2m1, e2m1.shape[:-2] + (-1, ))
+ 
+ 
++def u8_unpack_e2m1_code(u8_packed_e2m1: jax.Array) -> jax.Array:
++    """Unpack an e2m1 tensor packed into u8, and keep the four-bit code.
++
++    `u8_unpack_e2m1` returns `float4_e2m1fn` values. A TPU generation without an
++    FP4 matrix unit cannot lower a vector of that dtype, so this function
++    returns the same bits in `int4` storage. The bit order is the same, and the
++    sign bit of the code is the sign bit of the `int4`, so a consumer decodes
++    the code to its value with plain arithmetic.
++    """
++    assert u8_packed_e2m1.dtype == jnp.uint8
++    code = jax.lax.bitcast_convert_type(u8_packed_e2m1, jnp.int4)
++    # bitcast creates one more dimension that splits 8 bits into two codes.
++    # we flatten them with the last dim.
++    return jnp.reshape(code, code.shape[:-2] + (-1, ))
++
++
+ def e8m0_to_fp32(u8: jax.Array) -> jax.Array:
+     """Convert e8m0 (that was bitcasted to u8) into fp32."""
+     assert u8.dtype == jnp.uint8
+diff --git a/tpu_inference/layers/vllm/custom_ops/experimental/deepseek_v41/deepseek_v41_attention.py b/tpu_inference/layers/vllm/custom_ops/experimental/deepseek_v41/deepseek_v41_attention.py
+index 21fbcc1e..fc4b5270 100644
+--- a/tpu_inference/layers/vllm/custom_ops/experimental/deepseek_v41/deepseek_v41_attention.py
++++ b/tpu_inference/layers/vllm/custom_ops/experimental/deepseek_v41/deepseek_v41_attention.py
+@@ -41,9 +41,11 @@ carries the deltas that follow.
+    compiler schedules the independent projections itself.
+ """
+ import functools
++import os
+ from unittest.mock import patch
+ 
+ import jax
++import jax.numpy as jnp
+ import torch
+ from jax.sharding import PartitionSpec as P
+ from torchax.interop import jax_view, torch_view
+@@ -75,6 +77,51 @@ from tpu_inference.models.vllm.vllm_model_wrapper_context import \
+ 
+ logger = init_logger(__name__)
+ 
++# Set `DSV41_TRACE_LAYER_STATS=1` to print the numeric range of the tensors
++# inside the attention of each layer. The attention holds the compressor, the
++# indexer and the sparse kernel, so a `nan` that a layer-level trace shows at
++# the layer output needs this finer trace to name its source. Each printed
++# tensor adds a host callback, so the trace changes the compiled graph and
++# slows the run. Keep it off in production.
++_TRACE_LAYER_STATS = os.environ.get("DSV41_TRACE_LAYER_STATS") == "1"
++
++
++def _trace_attn(tag: str, **tensors) -> None:
++    """Print a `nan` flag, an `inf` flag and a magnitude for each tensor.
++
++    An integer tensor reports its smallest and largest value and how many
++    entries equal -1 instead. The top-k indices are integers, and -1 is the
++    value the index kernel writes for a slot it could not fill, so that count
++    is the number of gathers that read a row no request owns.
++    """
++    if not _TRACE_LAYER_STATS:
++        return
++    for name, tensor in tensors.items():
++        if tensor is None:
++            continue
++        value = jax_view(tensor)
++        if jnp.issubdtype(value.dtype, jnp.floating):
++            finite = jnp.where(jnp.isfinite(value), jnp.abs(value), 0.0)
++            jax.debug.print(
++                "DSV41_TRACE {tag} {name} nan={nan} inf={inf} absmax={absmax}",
++                tag=tag,
++                name=name,
++                nan=jnp.isnan(value).any(),
++                inf=jnp.isinf(value).any(),
++                absmax=jnp.max(finite),
++            )
++        else:
++            jax.debug.print(
++                "DSV41_TRACE {tag} {name} int min={low} max={high} "
++                "neg_ones={negs} size={size}",
++                tag=tag,
++                name=name,
++                low=jnp.min(value),
++                high=jnp.max(value),
++                negs=jnp.sum(value == -1),
++                size=value.size,
++            )
++
+ # The largest compress ratio a V4.1 layer uses. The SWA cache overlays the
+ # compressed NoPE array of a KV-source layer, whose page holds
+ # ``cache_config.block_size // compress_ratio`` records of 512 bytes. A ratio
+@@ -403,25 +450,35 @@ class VllmDeepseekV41MLAAttention(DeepseekV4Attention):
+         both cache writes must land before the sparse attention reads either
+         cache.
+         """
++        tag = f"L{self.layer_id:02d}attn"
+         q = self.wq_b(qr).view(-1, self.n_local_heads, self.head_dim)
+         q = self.qnorm_rope(q, positions)
+         kv = self.kv_rope(kv, positions)
++        _trace_attn(tag,
++                    q=q,
++                    kv=kv,
++                    kv_score=kv_score,
++                    indexer_weights=indexer_weights)
+ 
+         latent = None
+         if self.compressor is not None:
+             latent = self.compressor(kv_score, positions)
++            _trace_attn(tag, latent=latent)
+ 
+         topk_indices = self._topk_indices(qr, latent, indexer_weights,
+                                           positions)
++        _trace_attn(tag, topk=topk_indices)
+ 
+         if self.compressor is not None:
+             self.compressor.insert_cache(latent, positions, self.rotary_emb)
+ 
+-        return self.forward_mqa(q,
+-                                kv,
+-                                positions,
+-                                None,
+-                                topk_indices=topk_indices)
++        output = self.forward_mqa(q,
++                                  kv,
++                                  positions,
++                                  None,
++                                  topk_indices=topk_indices)
++        _trace_attn(tag, attn_out=output)
++        return output
+ 
+     def forward_mqa(
+         self,
+diff --git a/tpu_inference/layers/vllm/custom_ops/experimental/deepseek_v41/deepseek_v41_compressor.py b/tpu_inference/layers/vllm/custom_ops/experimental/deepseek_v41/deepseek_v41_compressor.py
+index 303bd2aa..b1011a04 100644
+--- a/tpu_inference/layers/vllm/custom_ops/experimental/deepseek_v41/deepseek_v41_compressor.py
++++ b/tpu_inference/layers/vllm/custom_ops/experimental/deepseek_v41/deepseek_v41_compressor.py
+@@ -71,6 +71,12 @@ ROPE_CHANNELS = 64
+ NOPE_CHANNELS = 448
+ QUANT_BLOCK = 64
+ FP8_MAX = 448.0
++# Bytes in one NoPE record: `NOPE_CHANNELS` FP8 values, then one E8M0 scale for
++# each `QUANT_BLOCK` of them, then zero padding to the record width. The width
++# is a property of the format, not of the array that stores it. The runner
++# splits the array into `(pages, rows, packing, lanes)`, and a record spans the
++# packing axis when `lanes` is narrower than the record.
++NOPE_RECORD_BYTES = 512
+ 
+ 
+ def quantize_e8m0(x: jax.Array, block: int) -> tuple[jax.Array, jax.Array]:
+@@ -451,8 +457,7 @@ class VllmDeepseekV41Compressor(DeepseekCompressor):
+             request_ids = _token_request_ids(query_start_loc, num_tokens)
+ 
+             nope_record, rope_record = build_kv_records(
+-                latent, positions, cos_sin_cache, ratio,
+-                nope_cache.shape[-1])
++                latent, positions, cos_sin_cache, ratio, NOPE_RECORD_BYTES)
+ 
+             closes_group = (positions + 1) % ratio == 0
+             closes_group &= _real_tokens(query_start_loc, request_ids,
+@@ -460,10 +465,14 @@ class VllmDeepseekV41Compressor(DeepseekCompressor):
+             states = positions // ratio
+ 
+             def _scatter(cache, record):
+-                # One record occupies one row of the flattened cache, whatever
+-                # the packing axes above it are.
+-                page_size = cache.shape[1] * cache.shape[2]
+-                flat = cache.reshape(-1, cache.shape[-1])
++                # Flatten by the record, not by the array's last axis. The
++                # RoPE array holds its 128-byte record in one 128-byte lane,
++                # and the NoPE array holds its 512-byte record in four of
++                # them. Both then give one record for each row, and both give
++                # the same page size, because both hold one record for each
++                # state.
++                flat = cache.reshape(-1, record.shape[-1])
++                page_size = flat.shape[0] // cache.shape[0]
+                 slots = _paged_slots(block_tables, request_ids, states,
+                                      num_requests, page_size)
+                 slots = jnp.where(closes_group, slots, flat.shape[0])
+diff --git a/tpu_inference/layers/vllm/process_weights/cleanup_sharding.py b/tpu_inference/layers/vllm/process_weights/cleanup_sharding.py
+index cee43e0f..3f7363e0 100644
+--- a/tpu_inference/layers/vllm/process_weights/cleanup_sharding.py
++++ b/tpu_inference/layers/vllm/process_weights/cleanup_sharding.py
+@@ -81,7 +81,29 @@ def update_lora(model: torch.nn.Module,
+ 
+ 
+ def _extract_all_params_buffers(model: torch.nn.Module):
+-    return dict(model.named_parameters()), dict(model.named_buffers())
++    return (_drop_host_resident(dict(model.named_parameters())),
++            _drop_host_resident(dict(model.named_buffers())))
++
++
++def _drop_host_resident(tensors: dict[str, torch.Tensor]) -> dict[str, object]:
++    """Remove the tensors that a layer keeps in host memory on purpose.
++
++    A layer marks such a tensor with a `cpu_offloaded` attribute. The tensor is
++    too large for device memory and the layer reads it on the host, so it must
++    not move. It stays a plain module attribute, which
++    `torch.func.functional_call` leaves in place because the returned dictionary
++    does not name it.
++    """
++    kept = {
++        name: tensor
++        for name, tensor in tensors.items()
++        if not getattr(tensor, "cpu_offloaded", False)
++    }
++    dropped = len(tensors) - len(kept)
++    if dropped:
++        logger.info("Keeping %d host-resident tensor(s) off the device.",
++                    dropped)
++    return kept
+ 
+ 
+ def _tensor_is_in_cpu(tensor: torch.tensor) -> bool:
+diff --git a/tpu_inference/layers/vllm/quantization/mxfp4.py b/tpu_inference/layers/vllm/quantization/mxfp4.py
+index 308e1d2b..e1fe8144 100644
+--- a/tpu_inference/layers/vllm/quantization/mxfp4.py
++++ b/tpu_inference/layers/vllm/quantization/mxfp4.py
+@@ -45,14 +45,17 @@ from tpu_inference.layers.common.process_weights.moe_weights import (
+     shard_moe_weights)
+ from tpu_inference.layers.common.quant_methods import MXFP4
+ from tpu_inference.layers.common.quantization import (
+-    MXFP4_REQUANTIZED_BLOCK_SIZE, dequantize_tensor_from_mxfp4_packed)
++    MXFP4_BLOCK_SIZE, MXFP4_REQUANTIZED_BLOCK_SIZE,
++    dequantize_tensor_from_mxfp4_packed, u8_unpack_e2m1_code)
+ from tpu_inference.layers.common.sharding import ShardingAxisName
+ from tpu_inference.layers.vllm.interface.moe import (
+     select_moe_backend_from_fused_moe_config, vllm_moe_apply)
+ from tpu_inference.layers.vllm.quantization.configs import VllmQuantConfig
+ from tpu_inference.layers.vllm.quantization.unquantized import \
+     VllmUnquantizedLinearMethod
++import tpu_inference.envs as envs
+ from tpu_inference.logger import init_logger
++from tpu_inference.utils import to_jax_dtype
+ from tpu_inference.utils import get_mesh_shape_product, t2j
+ 
+ P = PartitionSpec
+@@ -60,6 +63,70 @@ P = PartitionSpec
+ logger = init_logger(__name__)
+ 
+ 
++_LOGGED_REQUANTIZE_CHOICE = False
++
++# The value of MOE_REQUANTIZE_WEIGHT_DTYPE that keeps the checkpoint's own
++# encoding. It names a format, not a dtype, so it never reaches
++# `to_jax_dtype`.
++_NATIVE_MXFP4 = "mxfp4"
++
++
++def _keep_native_encoding():
++    """Report whether to keep the checkpoint's MXFP4 encoding.
++
++    The GMM kernel decodes an E2M1 code and an E8M0 exponent itself. When it
++    does, the expert weight needs no dequantization and no requantization, so
++    it keeps both its four-bit footprint and the exact values the checkpoint
++    holds.
++    """
++    return envs.MOE_REQUANTIZE_WEIGHT_DTYPE == _NATIVE_MXFP4
++
++
++def _requantize_dtype():
++    """Expert weight dtype, overridable with MOE_REQUANTIZE_WEIGHT_DTYPE.
++
++    A TPU generation without an FP4 matrix unit cannot lower an FP4 expert
++    weight, so the override selects a dtype the kernel supports on that
++    generation. `int4` keeps the 4-bit footprint.
++    """
++    if envs.MOE_REQUANTIZE_WEIGHT_DTYPE:
++        return to_jax_dtype(envs.MOE_REQUANTIZE_WEIGHT_DTYPE)
++    return jnp.float4_e2m1fn
++
++
++def _requantize_block_size():
++    """Expert scale block size, overridable with MOE_REQUANTIZE_BLOCK_SIZE.
++
++    A smaller block holds more scales, and the scales are resident weights.
++    Raise this value when the expert weights do not fit in device memory.
++    """
++    if envs.MOE_REQUANTIZE_BLOCK_SIZE:
++        return int(envs.MOE_REQUANTIZE_BLOCK_SIZE)
++    return MXFP4_REQUANTIZED_BLOCK_SIZE
++
++
++def _log_requantize_choice(dtype, block_size):
++    """Report the resolved expert dtype and block size one time."""
++    global _LOGGED_REQUANTIZE_CHOICE
++    if _LOGGED_REQUANTIZE_CHOICE:
++        return
++    _LOGGED_REQUANTIZE_CHOICE = True
++    logger.info("MoE expert requantization: dtype=%s, block_size=%d",
++                jnp.dtype(dtype).name, block_size)
++
++
++def _log_native_choice():
++    """Report that the expert weights keep their MXFP4 encoding, one time."""
++    global _LOGGED_REQUANTIZE_CHOICE
++    if _LOGGED_REQUANTIZE_CHOICE:
++        return
++    _LOGGED_REQUANTIZE_CHOICE = True
++    logger.info("MoE experts keep the checkpoint MXFP4 encoding: "
++                "int4 E2M1 codes with one uint8 E8M0 scale for each block "
++                "of %d", MXFP4_BLOCK_SIZE)
++
++
++
+ @register_quantization_config(MXFP4)
+ class VllmMxfp4Config(Mxfp4Config, VllmQuantConfig):
+ 
+@@ -150,14 +217,43 @@ class VllmMxfp4MoEMethod(Mxfp4MoEMethod, FusedMoEMethodBase):
+             w2_weight_scale: jax.Array,
+             w2_bias: jax.Array | None,
+         ) -> FusedMoEWeights:
++            w13_interleave = layer.activation == MoEActivation.SWIGLUOAI
++            w13_reorder_size = get_mesh_shape_product(
++                self.mesh, ShardingAxisName.MLP_TENSOR)
++
++            if _keep_native_encoding():
++                _log_native_choice()
++                # Hand the kernel the checkpoint's own codes. `u8_unpack...`
++                # only splits the two codes that share a byte; it changes no
++                # value. The scale stays a raw E8M0 exponent in one byte,
++                # which `keep_scale_dtype` protects from a cast to float32.
++                # `compact_scale` then drops the scale's broadcast axis, which
++                # a TPU would otherwise pad to four bytes for each byte.
++                return process_moe_weights(
++                    FusedMoEWeights(
++                        w13_weight=u8_unpack_e2m1_code(w13_weight),
++                        w13_weight_scale=w13_weight_scale,
++                        w13_bias=w13_bias,
++                        w2_weight=u8_unpack_e2m1_code(w2_weight),
++                        w2_weight_scale=w2_weight_scale,
++                        w2_bias=w2_bias,
++                    ),
++                    moe_backend=self.moe_backend,
++                    w13_reorder_size=w13_reorder_size,
++                    w13_interleave=w13_interleave,
++                    keep_scale_dtype=True,
++                    compact_scale=True,
++                )
++
+             # Dequantize fp4 weights into fp32.
+             w13_weight = dequantize_tensor_from_mxfp4_packed(
+                 w13_weight, w13_weight_scale, 2, jnp.float32)
+             w2_weight = dequantize_tensor_from_mxfp4_packed(
+                 w2_weight, w2_weight_scale, 2, jnp.float32)
+-            w13_interleave = layer.activation == MoEActivation.SWIGLUOAI
+-            w13_reorder_size = get_mesh_shape_product(
+-                self.mesh, ShardingAxisName.MLP_TENSOR)
++
++            requantize_dtype = _requantize_dtype()
++            requantize_block_size = _requantize_block_size()
++            _log_requantize_choice(requantize_dtype, requantize_block_size)
+ 
+             weights = quantize_moe_weights(
+                 FusedMoEWeights(
+@@ -168,8 +264,8 @@ class VllmMxfp4MoEMethod(Mxfp4MoEMethod, FusedMoEMethodBase):
+                     w2_weight_scale=None,
+                     w2_bias=w2_bias,
+                 ),
+-                jnp.float4_e2m1fn,
+-                MXFP4_REQUANTIZED_BLOCK_SIZE,
++                requantize_dtype,
++                requantize_block_size,
+                 w13_interleave=w13_interleave,
+             )
+             return process_moe_weights(
+diff --git a/tpu_inference/models/vllm/experimental/deepseek_v41.py b/tpu_inference/models/vllm/experimental/deepseek_v41.py
+index 97b206e2..32cd3abc 100644
+--- a/tpu_inference/models/vllm/experimental/deepseek_v41.py
++++ b/tpu_inference/models/vllm/experimental/deepseek_v41.py
+@@ -25,18 +25,24 @@ alone, format both files the same way first::
+     diff -u /tmp/upstream_model.py tpu_inference/models/vllm/experimental/deepseek_v41.py
+ """
+ 
++import os
+ import typing
+ from collections.abc import Callable, Iterable
+ from itertools import islice
+ 
++import jax
++import jax.numpy as jnp
+ import regex as re
+ import torch
+ import torch.nn as nn
+ import vllm.envs as envs
++from torchax.interop import jax_view, torch_view
+ from tpu_inference.models.vllm.experimental.deepseek_v4 import \
+     DeepseekV4MoE as DeepseekV4MoEBase
+ from tpu_inference.models.vllm.experimental.mhc_torch import (
+     mhc_post_torch, mhc_pre_delayed_torch)
++from tpu_inference.models.vllm.vllm_model_wrapper_context import \
++    get_host_gathered_rows
+ from vllm.config import VllmConfig
+ from vllm.distributed import (get_pp_group, get_tensor_model_parallel_rank,
+                               get_tensor_model_parallel_world_size)
+@@ -79,6 +85,44 @@ if typing.TYPE_CHECKING:
+ 
+ logger = init_logger(__name__)
+ 
++# Set `DSV41_TRACE_LAYER_STATS=1` to print the numeric range of each decoder
++# layer's outputs. The trace tells you which layer first loses range, which is
++# the only practical way to find the source of a `nan` in a 40-layer forward
++# pass. The trace adds a host callback for each printed tensor, so it changes
++# the compiled graph and slows the run. Keep it off in production.
++_TRACE_LAYER_STATS = os.environ.get("DSV41_TRACE_LAYER_STATS") == "1"
++
++
++def _trace_stats(tag: str, **tensors: torch.Tensor | None) -> None:
++    """Print a `nan` flag, an `inf` flag and a magnitude for each tensor.
++
++    The print has to run inside the compiled graph, so it uses
++    `jax.debug.print` on the JAX value behind each torch tensor. `absmax`
++    ignores the non-finite entries, so a tensor that holds both a `nan` and a
++    real value still reports the real magnitude.
++    """
++    if not _TRACE_LAYER_STATS:
++        return
++    for name, tensor in tensors.items():
++        if tensor is None:
++            continue
++        value = jax_view(tensor)
++        if not jnp.issubdtype(value.dtype, jnp.floating):
++            # An integer tensor here means the weight was requantized. Say so,
++            # because a silent skip reads the same as a clean result.
++            logger.info("DSV41_TRACE %s %s non-float dtype=%s shape=%s", tag,
++                        name, value.dtype, value.shape)
++            continue
++        finite = jnp.where(jnp.isfinite(value), jnp.abs(value), 0.0)
++        jax.debug.print(
++            "DSV41_TRACE {tag} {name} nan={nan} inf={inf} absmax={absmax}",
++            tag=tag,
++            name=name,
++            nan=jnp.isnan(value).any(),
++            inf=jnp.isinf(value).any(),
++            absmax=jnp.max(finite),
++        )
++
+ 
+ class DeepseekV4MoE(DeepseekV4MoEBase):
+ 
+@@ -140,6 +184,10 @@ class DeepseekV4MoE(DeepseekV4MoEBase):
+         self.n_physical_experts = self.n_routed_experts
+         self.n_local_physical_experts = self.n_local_experts
+         self.n_redundant_experts = 0
++        # The reused V4 MoE builds `shared_experts` but does not record how
++        # many the config asks for. `extract_moe_parameters` reads the count,
++        # so set it here with the same value the CUDA MoE uses.
++        self.n_shared_experts = config.n_shared_experts
+ 
+ 
+ def _select_dsv4_attn_cls(
+@@ -221,7 +269,12 @@ class DeepseekV4DecoderLayer(nn.Module):
+             ),
+             requires_grad=False,
+         )
+-        self.hc_attn_fn_broadcast: torch.Tensor | None = None
++        # The weight loader derives this from ``hc_attn_fn`` after it loads the
++        # weights, and the sharding pass runs after that. Register it as a
++        # buffer, because that pass walks parameters and buffers only. A plain
++        # attribute would stay on the host and the first layer would then mix a
++        # host tensor into an accelerator matrix multiply.
++        self.register_buffer("hc_attn_fn_broadcast", None, persistent=False)
+         self.hc_ffn_fn = nn.Parameter(
+             torch.empty(
+                 (mix_hc, hc_dim),
+@@ -507,6 +560,67 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
+             ),
+         })
+ 
++    def _bind_host_engram_rows(self) -> torch.Tensor | None:
++        """Give each engram layer the rows the runner gathered, if it did.
++
++        An engram table is far larger than device memory allows, so it stays in
++        host memory and a TPU program cannot read it. The runner therefore
++        hashes and gathers on the host and passes the rows in. Returns the rows,
++        shaped [tables, tokens, columns, dim], or None when the runner passed
++        none. Clearing on None matters: a later forward without rows must read
++        the table, not the last forward's rows.
++        """
++        rows = get_host_gathered_rows()
++        if rows is not None:
++            rows = torch_view(rows)
++        index = 0
++        for layer in islice(self.layers, self.start_layer, self.end_layer):
++            engram = getattr(layer, "engram", None)
++            if engram is None:
++                continue
++            engram.embed_tokens.set_gathered_rows(
++                None if rows is None else rows[index])
++            index += 1
++        if rows is not None and index != rows.shape[0]:
++            raise ValueError(
++                f"the runner gathered rows for {rows.shape[0]} engram "
++                f"table(s), but this rank holds {index}")
++        return rows
++
++    def _engram_hash_inputs(
++        self, attn_metadata: object
++    ) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor | None,
++               int] | None:
++        """Read the four values the engram hash needs from the metadata.
++
++        Returns `(query_start_loc, slot_mapping, block_table, num_reqs)`, or
++        None when the metadata carries no `query_start_loc`.
++
++        Two runners reach this method and each passes a different object. The
++        CUDA runner passes a dict of per-layer metadata whose SWA entry carries
++        a `slot_mapping`, so the rolling slot cache works there. The TPU runner
++        passes one `AttentionMetadata` dataclass for the whole model, and that
++        class has no `slot_mapping`. The slot cache is therefore off on TPU and
++        the history comes from `lookback_token_ids` alone.
++        """
++        if isinstance(attn_metadata, dict):
++            assert self.engram_swa_prefix is not None
++            swa_metadata = typing.cast("DeepseekSparseSWAMetadata",
++                                       attn_metadata[self.engram_swa_prefix])
++            return (
++                swa_metadata.query_start_loc,
++                swa_metadata.slot_mapping,
++                swa_metadata.block_table,
++                swa_metadata.num_decodes + swa_metadata.num_prefills,
++            )
++        query_start_loc = getattr(attn_metadata, "query_start_loc", None)
++        if query_start_loc is None:
++            return None
++        num_reqs = getattr(attn_metadata, "padded_num_reqs", -1)
++        if num_reqs < 0:
++            num_reqs = query_start_loc.shape[0] - 1
++        return query_start_loc, None, None, num_reqs
++
+     def forward(
+         self,
+         input_ids: torch.Tensor,
+@@ -539,12 +653,37 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
+             attn_metadata = get_forward_context().attn_metadata
+             if isinstance(attn_metadata, list):
+                 attn_metadata = attn_metadata[dbo_current_ubatch_id()]
+-            if isinstance(attn_metadata,
+-                          dict) and self.engram_hash.ensure_cache():
+-                assert self.engram_swa_prefix is not None
+-                swa_metadata = typing.cast(
+-                    "DeepseekSparseSWAMetadata",
+-                    attn_metadata[self.engram_swa_prefix])
++            host_rows = self._bind_host_engram_rows()
++            if not self.engram_hash.ensure_cache():
++                # The SWA KV cache is unbound, so this is a profile run. The
++                # engram layers read nothing yet and the hashes are not used.
++                hash_inputs = None
++            elif host_rows is not None:
++                # The runner hashed and gathered on the host, because the
++                # tables do not fit in device memory. Every reader of the
++                # hashes now takes its rows from `host_rows`, so the hashes
++                # only have to carry the right shape.
++                hash_inputs = None
++                engram_mask = ~image_sentinel_mask(input_ids)
++                engram_hashes = input_ids.new_zeros(
++                    (input_ids.shape[0], host_rows.shape[0],
++                     self.engram_layout.n_hash_cols),
++                    dtype=torch.int32,
++                )
++            else:
++                hash_inputs = self._engram_hash_inputs(attn_metadata)
++                if hash_inputs is None:
++                    # Stop, rather than let the engram layers read rows that
++                    # were never gathered. A feature that quietly does nothing
++                    # is much harder to find than one that fails here.
++                    raise RuntimeError(
++                        "the engram config is set, but this forward found no "
++                        "`query_start_loc` on "
++                        f"{type(attn_metadata).__name__}, so the engram "
++                        "hashes cannot be computed")
++            if hash_inputs is not None:
++                (query_start_loc, slot_mapping, block_table,
++                 num_reqs) = hash_inputs
+                 # Image-span tokens are dead: they break n-grams (hash op
+                 # takes True=dead) and their gate is zeroed (Engram.forward
+                 # takes True=keep).
+@@ -556,18 +695,17 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
+                             "engram needs `lookback_token_ids` from the model "
+                             "runner (the DBO/ubatch wrapper drops model kwargs)"
+                         )
+-                    num_reqs = swa_metadata.num_decodes + swa_metadata.num_prefills
+                     lookback_token_ids = input_ids.new_full(
+                         (num_reqs, self.engram_hash.lookback_depth), -1)
+                 engram_hashes = self.engram_hash(
+                     input_ids,
+                     positions,
+-                    swa_metadata.query_start_loc,
++                    query_start_loc,
+                     image_mask,
+                     lookback_token_ids,
+                     image_sentinel_mask(lookback_token_ids),
+-                    swa_metadata.slot_mapping,
+-                    swa_metadata.block_table,
++                    slot_mapping,
++                    block_table,
+                 )
+                 # Gather all Engram rows before entering the decoder layers.
+                 for layer in islice(self.layers, self.start_layer,
+@@ -591,6 +729,7 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
+         if not get_pp_group().is_first_rank:
+             assert intermediate_tensors is not None
+             pre_mix = intermediate_tensors["pre_mix"]
++        _trace_stats("embed", hidden=hidden_states)
+         aux_hidden_states: list[torch.Tensor] = []
+         final_aux_recon: torch.Tensor | None = None  # avoid duplicate mhc_post call
+         for idx, layer in enumerate(
+@@ -608,6 +747,12 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
+                 engram_hashes,
+                 engram_mask,
+             )
++            _trace_stats(
++                f"L{idx:02d}",
++                hidden=hidden_states,
++                residual=residual,
++                pre_mix=pre_mix,
++            )
+             if idx + 1 in self.aux_hidden_state_layers:
+                 # Reconstruct the aux hidden state for draft models
+                 aux_recon = mhc_post_torch(hidden_states, residual, post_mix,
+@@ -647,7 +792,9 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
+         assert pre_mix is not None
+         hidden_states = ((pre_mix.unsqueeze(-1) * hidden_states.float()).sum(
+             dim=1).to(hidden_states.dtype))
++        _trace_stats("collapse", hidden=hidden_states)
+         hidden_states = self.norm(hidden_states)
++        _trace_stats("norm", hidden=hidden_states)
+         if len(aux_hidden_states) > 0:
+             return hidden_states, aux_hidden_states
+         return hidden_states
+@@ -1025,20 +1172,38 @@ class DeepseekV41LLMForCausalLM(
+     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
+         return self.model.embed_input_ids(input_ids)
+ 
++    def _trace_head(self, tag: str, hidden_states: torch.Tensor,
++                    logits: torch.Tensor | None) -> None:
++        """Trace the three tensors of the output stage.
++
++        The decoder-layer trace stops at the final norm. This one covers the
++        gap between that norm and the sampler: the hidden state the runner
++        selected, the output projection weight as it sits on the device, and
++        the logits themselves.
++        """
++        weight = getattr(self.lm_head, "weight", None)
++        _trace_stats(tag,
++                     head_in=hidden_states,
++                     head_weight=weight,
++                     head_out=logits)
++
+     def compute_logits(
+         self,
+         hidden_states: torch.Tensor,
+     ) -> torch.Tensor | None:
+         logits = self.logits_processor(self.lm_head, hidden_states)
++        self._trace_head("head", hidden_states, logits)
+         return logits
+ 
+     def compute_logits_local(
+         self,
+         hidden_states: torch.Tensor,
+     ) -> torch.Tensor:
+-        return self.logits_processor(self.lm_head,
+-                                     hidden_states,
+-                                     skip_gather=True)
++        logits = self.logits_processor(self.lm_head,
++                                       hidden_states,
++                                       skip_gather=True)
++        self._trace_head("head_local", hidden_states, logits)
++        return logits
+ 
+     @staticmethod
+     def get_model_state_cls():
+@@ -1081,9 +1246,39 @@ class DeepseekV41LLMForCausalLM(
+         loader = AutoWeightsLoader(self)
+         loaded_params = loader.load_weights(weights,
+                                             mapper=self.hf_to_vllm_mapper)
++        self._report_unfilled_parameters(loaded_params)
+         self.process_weights_after_loading()
+         return loaded_params
+ 
++    def _report_unfilled_parameters(self, loaded_params: set[str]) -> None:
++        """Report every declared parameter that no checkpoint tensor filled.
++
++        The vLLM loader checks the checkpoint side: it raises when a
++        checkpoint tensor matches no parameter. It does not check this side.
++        A parameter that the checkpoint never names keeps the uninitialized
++        memory that `torch.empty` returned, which reads as an arbitrary bit
++        pattern rather than as a zero, so the model produces a plausible
++        shape of output and a meaningless value.
++        """
++        for name, param in self.named_parameters():
++            if name in loaded_params:
++                continue
++            detail = ""
++            try:
++                value = jax_view(param.data)
++                if jnp.issubdtype(value.dtype, jnp.floating):
++                    finite = jnp.where(jnp.isfinite(value), jnp.abs(value),
++                                       0.0)
++                    detail = (f" nan={bool(jnp.isnan(value).any())}"
++                              f" inf={bool(jnp.isinf(value).any())}"
++                              f" absmax={float(jnp.max(finite))}")
++            except Exception as error:  # noqa: BLE001
++                detail = f" (stats unavailable: {error})"
++            logger.warning(
++                "DSV41_UNFILLED parameter %s received no checkpoint tensor: "
++                "shape=%s dtype=%s%s", name, tuple(param.shape), param.dtype,
++                detail)
++
+     def process_weights_after_loading(self) -> None:
+         self.model.finalize_mega_moe_weights()
+         self.model.finalize_mhc_broadcast_weights()
+diff --git a/tpu_inference/models/vllm/experimental/engram_host_lookup.py b/tpu_inference/models/vllm/experimental/engram_host_lookup.py
+new file mode 100644
+index 00000000..c604dce1
+--- /dev/null
++++ b/tpu_inference/models/vllm/experimental/engram_host_lookup.py
+@@ -0,0 +1,256 @@
++# Copyright 2025 Google LLC
++#
++# Licensed under the Apache License, Version 2.0 (the "License");
++# you may not use this file except in compliance with the License.
++# You may obtain a copy of the License at
++#
++#     http://www.apache.org/licenses/LICENSE-2.0
++#
++# Unless required by applicable law or agreed to in writing, software
++# distributed under the License is distributed on an "AS IS" BASIS,
++# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++# See the License for the specific language governing permissions and
++# limitations under the License.
++"""Host-side n-gram hash and Engram row gather for TPU.
++
++The DeepSeek V4.1 Engram tables hold about 92 GiB each. Two of them plus the
++rest of the weights do not fit in the HBM of a v6e slice, so the tables stay in
++host memory. A TPU program cannot address host memory, so the lookup cannot run
++inside the traced step function.
++
++This module runs the whole Engram lookup on the host, before the step function
++starts:
++
++1. It hashes the n-grams that end at each token.
++2. It gathers and dequantizes the rows those hashes name.
++3. It returns one bf16 array for the step function to consume.
++
++The step function then hands the rows to `ParallelEngramEmbedding`, which reads
++them instead of the table. The hash and the gather both reuse the model's own
++reference implementations, so the result matches the accelerator path.
++"""
++
++from __future__ import annotations
++
++import ml_dtypes
++import numpy as np
++import torch
++
++from tpu_inference.logger import init_logger
++
++logger = init_logger(__name__)
++
++
++#: Attributes that a loader wrapper uses to hold the model it wraps. The
++#: runner receives the outermost wrapper, and only the innermost object is a
++#: `torch.nn.Module`.
++_WRAPPER_ATTRS = ("model", "vllm_model", "module")
++
++
++def _first_torch_module(obj: object, depth: int = 4) -> "torch.nn.Module|None":
++    """Descend through loader wrappers to the first `torch.nn.Module`.
++
++    Return None when no wrapper attribute leads to one inside `depth` steps.
++    """
++    for _ in range(depth):
++        if isinstance(obj, torch.nn.Module):
++            return obj
++        for attr in _WRAPPER_ATTRS:
++            inner = getattr(obj, attr, None)
++            if inner is not None and inner is not obj:
++                obj = inner
++                break
++        else:
++            return None
++    return obj if isinstance(obj, torch.nn.Module) else None
++
++
++def maybe_build_engram_host_lookup(model: object) -> "EngramHostLookup | None":
++    """Return a lookup for `model`, or None when it needs no host gather.
++
++    Safe to call for any model. Only a model whose layers hold an Engram module
++    gets one back.
++    """
++    if model is None:
++        return None
++    lookup = EngramHostLookup(model)
++    return lookup if lookup.enabled else None
++
++
++def _to_host(tensor: torch.Tensor) -> torch.Tensor:
++    """Return a plain CPU torch tensor, whatever backend holds `tensor`."""
++    if type(tensor) is torch.Tensor and tensor.device.type == "cpu":
++        return tensor
++    from torchax.interop import jax_view
++    import jax
++    return torch.from_numpy(np.asarray(jax.device_get(jax_view(tensor))))
++
++
++class EngramHostLookup:
++    """Hashes and gathers Engram rows on the host for one model instance.
++
++    Build one per model. `gather` returns
++    `[num_engram_layers, num_tokens, n_hash_cols, head_dim]` bf16, which is the
++    same value `ParallelEngramEmbedding.lookup` writes on an accelerator that
++    can address the table.
++    """
++
++    def __init__(self, model: object) -> None:
++        self._hash_state = None
++        self._layout = None
++        self._embeddings: list = []
++        self._tables: dict[str, torch.Tensor] | None = None
++        self.lookback_depth = 0
++        self.n_hash_cols = 0
++        self.head_dim = 0
++        # The runner holds a wrapper, not the decoder, and how deep the decoder
++        # sits varies by loader. Descend to the first `torch.nn.Module`, then
++        # search that tree by attribute instead of by path.
++        root = _first_torch_module(model)
++        if root is None:
++            logger.info(
++                "No Engram host lookup: %s holds no torch module to search.",
++                type(model).__name__)
++            return
++        backbone = None
++        for module in root.modules():
++            if getattr(module, "engram_hash", None) is not None:
++                backbone = module
++                break
++        if backbone is None:
++            logger.info(
++                "No Engram host lookup: no module under %s has an "
++                "`engram_hash`.",
++                type(root).__name__)
++            return
++        self._hash_state = backbone.engram_hash
++        self._layout = backbone.engram_layout
++        for layer in backbone.layers:
++            engram = getattr(layer, "engram", None)
++            if engram is not None:
++                self._embeddings.append(engram.embed_tokens)
++        if not self._embeddings:
++            # The model declares the hash state but holds no Engram layer, so
++            # this rank has nothing to gather.
++            logger.info(
++                "No Engram host lookup: %s declares an `engram_hash` but "
++                "holds no Engram layer on this rank.",
++                type(backbone).__name__)
++            return
++        self.lookback_depth = self._hash_state.lookback_depth
++        # Read the row shape off an embedding, not off the layout: an embedding
++        # returns only the head columns its own rank owns.
++        self.n_hash_cols = self._embeddings[0].part_n_hash_cols
++        self.head_dim = self._embeddings[0].dim
++        logger.info(
++            "Engram host lookup ready: %d table(s), %d hash column(s), "
++            "lookback depth %d.", len(self._embeddings), self.n_hash_cols,
++            self.lookback_depth)
++
++    @property
++    def enabled(self) -> bool:
++        """True when this model has Engram layers to gather for."""
++        return bool(self._embeddings)
++
++    @property
++    def num_tables(self) -> int:
++        """How many Engram tables this rank holds, one per Engram layer."""
++        return len(self._embeddings)
++
++    def row_shape(self, num_tokens: int) -> tuple[int, int, int, int]:
++        """Shape of the array `gather_rows` returns for `num_tokens` tokens.
++
++        Precompilation needs this before any real tokens exist, so that the
++        compiled step function takes the same shape the runner later passes.
++        """
++        return (self.num_tables, num_tokens, self.n_hash_cols, self.head_dim)
++
++    def ready(self) -> bool:
++        """True when the KV cache is bound, so the rows are used this step.
++
++        A profile run leaves the KV cache unbound. The model skips the Engram
++        layers then, so the gather would be wasted work.
++        """
++        return self.enabled and self._hash_state.ensure_cache()
++
++    def _host_tables(self) -> dict[str, torch.Tensor]:
++        """CPU copies of the four constant hash tables, built once.
++
++        The tables are registered buffers, so the weight loader may have moved
++        them to the accelerator. They are small and never change, so one copy
++        back to the host serves every step.
++        """
++        if self._tables is None:
++            state = self._hash_state
++            self._tables = {
++                name: _to_host(getattr(state, name))
++                for name in ("token_map", "multipliers", "primes", "offsets")
++            }
++        return self._tables
++
++    def hashes(
++        self,
++        input_ids: np.ndarray,
++        positions: np.ndarray,
++        query_start_loc: np.ndarray,
++        lookback_token_ids: np.ndarray,
++    ) -> torch.Tensor:
++        """Hash ids for every token, shaped [tokens, layers, hash columns].
++
++        All four inputs are host arrays. `lookback_token_ids[req, k]` is the
++        token `k + 1` positions before the request's first scheduled token, or
++        -1 where no such token exists.
++        """
++        from vllm.models.deepseek_v4_1.common.engram import _hash_ids_reference
++        from vllm.models.deepseek_v4_1.common.mm_preprocess import \
++            image_sentinel_mask
++
++        tables = self._host_tables()
++        ids = torch.from_numpy(np.ascontiguousarray(input_ids)).to(torch.int32)
++        lookback = torch.from_numpy(
++            np.ascontiguousarray(lookback_token_ids)).to(torch.int32)
++        num_layers, max_ngram = tables["multipliers"].shape
++        num_heads = tables["primes"].shape[-1]
++        output = torch.empty(
++            (ids.shape[0], num_layers, (max_ngram - 1) * num_heads),
++            dtype=torch.int32,
++        )
++        _hash_ids_reference(
++            ids,
++            tables["token_map"],
++            image_sentinel_mask(ids),
++            torch.from_numpy(np.ascontiguousarray(positions)).to(torch.int32),
++            None,
++            torch.from_numpy(np.ascontiguousarray(query_start_loc)).to(
++                torch.int32),
++            tables["multipliers"],
++            tables["primes"],
++            tables["offsets"],
++            None,
++            lookback,
++            image_sentinel_mask(lookback),
++            output,
++            self._hash_state.pad_id,
++            self._hash_state.block_size,
++        )
++        return output
++
++    def gather_rows(self, hash_chunks: list) -> np.ndarray:
++        """Gather the rows that `hash_chunks` name, as one host array.
++
++        Each chunk comes from `hashes`. A caller that hashes one data-parallel
++        rank at a time passes the chunks in token order, and this joins them, so
++        the gather runs once for the whole step.
++
++        The result is [tables, tokens, hash columns, head dim] bfloat16. Torch
++        cannot hand a bfloat16 tensor to NumPy, so the bytes travel as uint16
++        and `ml_dtypes` relabels them without a copy.
++        """
++        hash_ids = (hash_chunks[0]
++                    if len(hash_chunks) == 1 else torch.cat(hash_chunks, dim=0))
++        rows = [
++            embedding.gather_on_host(hash_ids[:, index])
++            for index, embedding in enumerate(self._embeddings)
++        ]
++        stacked = torch.stack(rows, dim=0)
++        return stacked.view(torch.uint16).numpy().view(ml_dtypes.bfloat16)
+diff --git a/tpu_inference/models/vllm/vllm_model_wrapper.py b/tpu_inference/models/vllm/vllm_model_wrapper.py
+index a4b9da3c..bb30d1d2 100644
+--- a/tpu_inference/models/vllm/vllm_model_wrapper.py
++++ b/tpu_inference/models/vllm/vllm_model_wrapper.py
+@@ -13,6 +13,7 @@
+ # limitations under the License.
+ 
+ import copy
++import re
+ import time
+ from collections.abc import Sequence
+ from contextlib import nullcontext
+@@ -27,6 +28,7 @@ import torch.nn
+ import torchax
+ import vllm.envs as vllm_envs
+ from flax.typing import PRNGKey
++from jax._src import dtypes as jax_dtypes
+ from jax.experimental.layout import Format, Layout
+ from jax.sharding import Mesh, NamedSharding, PartitionSpec
+ from torchax.interop import jax_view, torch_view
+@@ -104,6 +106,79 @@ def _to_row_major(arr: jax.Array, key: str) -> jax.Array:
+     return out
+ 
+ 
++def _weight_family(name: str) -> str:
++    """Collapse a weight name to the family that it belongs to.
++
++    A layer index makes every weight name unique, and that hides the shape of
++    the memory budget. Replace each index with `N`, so that all layers of one
++    weight report as one row.
++    """
++    return re.sub(r"(?<=\.)\d+(?=\.)", "N", name)
++
++
++def _log_resident_weight_bytes(params_and_buffers: dict) -> None:
++    """Log how much device memory the sharded weights actually take.
++
++    A weight can take more memory on the chip than it takes in the checkpoint.
++    Three mechanisms widen it, and the checkpoint inventory shows none of them:
++    the loader requantizes a sub-byte weight to a wider type, a kernel pads an
++    axis to its own block size, and a shard that does not land on a tile
++    boundary is padded to one. Report the addressable bytes, the bytes that the
++    runtime reserves, and a breakdown by weight family with the dtype and the
++    shard shape. Then you can check a memory budget against the hardware
++    instead of against arithmetic over the checkpoint.
++    """
++    gib = 1024**3
++    logical = 0
++    reserved = 0
++    families: dict[str, list] = {}
++    worst: list[tuple[int, str, tuple, int, int]] = []
++    for key, value in params_and_buffers.items():
++        array = jax_view(value)
++        if not hasattr(array, "addressable_shards"):
++            continue
++        row = families.setdefault(_weight_family(key), [0, 0, None, None])
++        for shard in array.addressable_shards:
++            data = shard.data
++            # Not `dtype.itemsize`. A sub-byte dtype such as `float4_e2m1fn`
++            # packs two values in a byte and still reports an itemsize of 1,
++            # which counts a packed weight at twice its real cost.
++            here = (data.size * jax_dtypes.itemsize_bits(data.dtype)) // 8
++            # `on_device_size_in_bytes` reports what the runtime reserved,
++            # including any tile padding. `nbytes` is the logical size, so it
++            # is only a fallback for a backend that does not expose the first.
++            measure = getattr(data, "on_device_size_in_bytes", None)
++            there = measure() if callable(measure) else here
++            logical += here
++            reserved += max(here, there)
++            row[0] += max(here, there)
++            row[1] += 1
++            row[2] = str(data.dtype)
++            row[3] = tuple(data.shape)
++            if there > here:
++                worst.append((there - here, key, data.shape, here, there))
++    if logical == 0:
++        return
++    logger.info(
++        "Resident weights on this host: %.2f GiB reserved, %.2f GiB "
++        "addressable, %.2f%% overhead from shard padding.", reserved / gib,
++        logical / gib, 100.0 * (reserved - logical) / logical)
++    ranked = sorted(families.items(), key=lambda item: -item[1][0])
++    for family, (kept, shards, dtype, shape) in ranked[:24]:
++        logger.info(
++            "  family %-48s %8.3f GiB over %5d shard(s), %-14s shard shape %s",
++            family, kept / gib, shards, dtype, shape)
++    if len(ranked) > 24:
++        logger.info("  family %-48s %8.3f GiB over %5d more family(s)",
++                    "<remainder>",
++                    sum(row[0] for _, row in ranked[24:]) / gib,
++                    len(ranked) - 24)
++    for cost, key, shape, here, there in sorted(worst, reverse=True)[:5]:
++        logger.info(
++            "  padded weight %s shard %s: %d -> %d bytes (+%.2f GiB over all "
++            "shards of this name)", key, shape, here, there, cost / gib)
++
++
+ class _VllmRunner(torch.nn.Module):
+ 
+     def __init__(self, vllm_model: torch.nn.Module):
+@@ -330,6 +405,8 @@ class VllmModelWrapper:
+         # NOTE: Apply Qwen3-VL model specific patches
+         apply_model_specific_patches(self.model.vllm_model)
+ 
++        _log_resident_weight_bytes(params_and_buffers)
++
+         loading_end = time.time()
+         total_loading_time = loading_end - loading_start
+         # Warning: Please DO NOT remove the below logging line.
+@@ -363,6 +440,7 @@ class VllmModelWrapper:
+             is_last_rank: bool = True,
+             shared_attention_metadata: SharedAttentionMetadata | None = None,
+             *args,
++            host_gathered_rows: jax.Array | None = None,
+         ) -> Tuple[List[jax.Array], jax.Array, List[jax.Array]] | Tuple[
+                 List[jax.Array], jax.Array, List[jax.Array], jax.Array]:
+             layer_name_to_kvcache_index = dict(layer_name_to_kvcache_index)
+@@ -381,7 +459,8 @@ class VllmModelWrapper:
+                     mesh=self.mesh,
+                     layer_name_to_kvcache_index=layer_name_to_kvcache_index,
+                     vllm_config=self.vllm_config,
+-                    shared_attn_metadata=shared_attention_metadata
++                    shared_attn_metadata=shared_attention_metadata,
++                    host_gathered_rows=host_gathered_rows,
+             ), set_forward_context(attn_metadata=attn_metadata,
+                                    vllm_config=self.vllm_config,
+                                    num_tokens=num_tokens):
+diff --git a/tpu_inference/models/vllm/vllm_model_wrapper_context.py b/tpu_inference/models/vllm/vllm_model_wrapper_context.py
+index d1664a52..ea2bac46 100644
+--- a/tpu_inference/models/vllm/vllm_model_wrapper_context.py
++++ b/tpu_inference/models/vllm/vllm_model_wrapper_context.py
+@@ -32,11 +32,26 @@ class VllmModelWrapperContext:
+     vllm_config: Optional[VllmConfig] = None
+     expert_indices_list: List[jax.Array] = field(default_factory=list)
+     shared_attn_metadata: SharedAttentionMetadata = field(default_factory=None)
++    # Rows that the runner gathered on the host for a model whose lookup table
++    # is too large for device memory, shaped
++    # [tables, tokens, columns, dim]. None when the model has no such table.
++    host_gathered_rows: Optional[jax.Array] = None
+ 
+ 
+ _vllm_model_wrapper_context: Optional[VllmModelWrapperContext] = None
+ 
+ 
++def get_host_gathered_rows() -> Optional[jax.Array]:
++    """Rows the runner gathered on the host for this step, or None.
++
++    Returns None outside a wrapper context too, so a model can call this on any
++    path without first testing whether the wrapper set one up.
++    """
++    if _vllm_model_wrapper_context is None:
++        return None
++    return _vllm_model_wrapper_context.host_gathered_rows
++
++
+ def get_vllm_model_wrapper_context() -> VllmModelWrapperContext:
+     assert _vllm_model_wrapper_context is not None, (
+         "VllmModelWrapperContext is not set. "
+@@ -53,6 +68,7 @@ def set_vllm_model_wrapper_context(
+     layer_name_to_kvcache_index: Dict[str, int] = None,
+     vllm_config: Optional[VllmConfig] = None,
+     shared_attn_metadata: SharedAttentionMetadata = None,
++    host_gathered_rows: Optional[jax.Array] = None,
+ ):
+     global _vllm_model_wrapper_context
+     prev_context = _vllm_model_wrapper_context
+@@ -62,6 +78,7 @@ def set_vllm_model_wrapper_context(
+         layer_name_to_kvcache_index=layer_name_to_kvcache_index,
+         vllm_config=vllm_config,
+         shared_attn_metadata=shared_attn_metadata,
++        host_gathered_rows=host_gathered_rows,
+     )
+ 
+     try:
+diff --git a/tpu_inference/runner/compilation_manager.py b/tpu_inference/runner/compilation_manager.py
+index 37db5ff6..bf851c34 100644
+--- a/tpu_inference/runner/compilation_manager.py
++++ b/tpu_inference/runner/compilation_manager.py
+@@ -117,6 +117,21 @@ class CompilationManager:
+             return device_array(self.runner.mesh, tensor, sharding=sharding)
+         return device_array(self.runner.mesh, tensor)
+ 
++    def _create_host_gathered_rows(self, num_tokens: int) -> Any:
++        """Dummy rows for a model whose lookup table sits in host memory.
++
++        Returns None when the model has no such table. The step function then
++        takes None for this argument at runtime too, so the two agree.
++        """
++        lookup = getattr(self.runner, "engram_host_lookup", None)
++        if lookup is None:
++            return None
++        return device_array(
++            self.runner.mesh,
++            jnp.zeros(lookup.row_shape(num_tokens), dtype=jnp.bfloat16),
++            sharding=NamedSharding(self.runner.mesh, PartitionSpec()),
++        )
++
+     def _should_skip_padding_combination(self, outer_val: int, inner_val: int,
+                                          only_equal: bool) -> bool:
+         """Helper to determine if we should skip this padding combination."""
+@@ -501,6 +516,12 @@ class CompilationManager:
+             )
+             shared_attention_metadata = build_shared_attn()
+ 
++        # A model whose lookup table is too large for device memory takes the
++        # rows the runner gathers on the host. Warm up with the same shape the
++        # runner passes later, or the executable does not match and we
++        # recompile on the first real step.
++        host_gathered_rows = self._create_host_gathered_rows(num_tokens)
++
+         def model_fn_warmup(_fn, _args, _call_kwargs):
+             out = self.runner.model_fn(
+                 self.runner.state_leaves,
+@@ -515,6 +536,7 @@ class CompilationManager:
+                 is_first_rank,
+                 is_last_rank,
+                 shared_attention_metadata=shared_attention_metadata,
++                host_gathered_rows=host_gathered_rows,
+             )
+             self.runner.kv_caches = out[0]
+             return out
+@@ -541,6 +563,7 @@ class CompilationManager:
+                 num_reqs=num_reqs,
+                 warmup_handler=model_fn_warmup,
+                 shared_attention_metadata=shared_attention_metadata,
++                host_gathered_rows=host_gathered_rows,
+             )
+ 
+     def _precompile_substitute_placeholder_token(self) -> None:
+diff --git a/tpu_inference/runner/kv_cache_manager.py b/tpu_inference/runner/kv_cache_manager.py
+index a840ecd8..c20f5db7 100644
+--- a/tpu_inference/runner/kv_cache_manager.py
++++ b/tpu_inference/runner/kv_cache_manager.py
+@@ -32,6 +32,8 @@ from vllm.models.deepseek_v4.compressor import CompressorStateCache
+ # Both families can be present, so both must be recognized.
+ from vllm.models.deepseek_v4_1.attention import \
+     DeepseekV4Attention as DeepseekV41Attention
++from vllm.models.deepseek_v4_1.attention import \
++    DeepseekV4IndexerCache as DeepseekV41IndexerCache
+ from vllm.models.deepseek_v4_1.compressor import \
+     CompressorStateCache as DeepseekV41CompressorStateCache
+ from vllm.v1.attention.backend import AttentionType
+@@ -73,12 +75,14 @@ DEFAULT_MAMBA_CHECKPOINT_BUDGET_MULTIPLIER = 2
+ 
+ 
+ def is_cache_for_ds_v4(attn_module: AttentionLayerBase) -> bool:
+-    return isinstance(attn_module, DeepseekV4IndexerCache) or isinstance(
+-        attn_module, DeepseekV4SWACache) or isinstance(
+-            attn_module,
+-            (DeepseekV4Attention, DeepseekV41Attention)) or isinstance(
++    return isinstance(
++        attn_module,
++        (DeepseekV4IndexerCache, DeepseekV41IndexerCache)) or isinstance(
++            attn_module, DeepseekV4SWACache) or isinstance(
+                 attn_module,
+-                (CompressorStateCache, DeepseekV41CompressorStateCache))
++                (DeepseekV4Attention, DeepseekV41Attention)) or isinstance(
++                    attn_module,
++                    (CompressorStateCache, DeepseekV41CompressorStateCache))
+ 
+ 
+ # Architectures whose KV cache the DSv4 overlay planner owns. V4.1 keeps the
+@@ -1277,11 +1281,17 @@ class KVCacheManager:
+             num_blocks = min(num_blocks,
+                              self.runner.cache_config.num_gpu_blocks_override)
+ 
+-        def _create_cache(shape: tuple, tag: str) -> jax.Array:
+-            """Allocate one uint8 DSv4 array and register it as a new index."""
++        def _create_cache(shape: tuple,
++                          tag: str,
++                          dtype: jnp.dtype = jnp.uint8) -> jax.Array:
++            """Allocate one DSv4 array and register it as a new index.
++
++            The packed record arrays are uint8. A compressor state cache holds
++            whole float32 rows, so it passes its own dtype.
++            """
+             cache = create_kv_cache_of_shape(shape,
+                                              mesh=self.runner.mesh,
+-                                             cache_dtype=jnp.uint8)
++                                             cache_dtype=dtype)
+             logger.debug("[kv-cache] DSv4 array %d for %s: shape=%s",
+                          len(kv_caches), tag, cache.shape)
+             kv_caches.append(cache)
+@@ -1386,7 +1396,16 @@ class KVCacheManager:
+             raise ValueError(
+                 "[kv-cache] DSv4 model has no CSA layer to host the swa_caches"
+                 f" (expected {expected}). MLA layers={mla_layer_names}")
+-        swa_host_indices = list(csa_nope_indices)
++        # V4 shares an array between a sliding-window layer and a CSA NoPE
++        # layer. V4.1 cannot, because its sparse attention reads the NoPE
++        # array outside the block table on purpose: the kernel gives every
++        # unfilled top-k slot a pseudo-random page and offset, to spread the
++        # gather instead of letting it hit one row. Those reads land anywhere
++        # in the array, so the array must hold NoPE records and nothing else.
++        # A sliding-window row is BF16. Its bytes decode as an E8M0 scale of
++        # `2 ** (byte - 127)`, which reaches 2e33, and the byte 0xFF decodes
++        # as a `nan`. So V4.1 gives every sliding-window layer its own array.
++        swa_host_indices = [] if is_v41 else list(csa_nope_indices)
+         for group_swa_layers in swa_layer_groups:
+             for position, layer_name in enumerate(group_swa_layers):
+                 if position >= len(swa_host_indices):
+@@ -1398,11 +1417,31 @@ class KVCacheManager:
+                     swa_host_indices.append(len(kv_caches) - 1)
+                 layer_to_index[layer_name] = swa_host_indices[position]
+ 
+-        # CSA and indexer compressor state caches overlay onto the compressed kv
+-        # array of their own (sub)layer;
+-        # HCA compressor state caches overlay onto CSA NoPE arrays.
++        # V4 and V4.1 hold the compressor state in two different ways, so the
++        # array plan differs.
++        #
++        # V4 packs the state into the compressed record itself, and its kernel
++        # asserts the two share one array: a CSA or indexer state cache overlays
++        # the compressed KV array of its own (sub)layer, and an HCA state cache
++        # overlays a CSA NoPE array.
++        #
++        # V4.1 keeps the state as whole float32 rows of `2 * head_dim`
++        # channels, which is eight times a compressed record. It cannot overlay
++        # a record array, so give it a dedicated array in its own dtype. The
++        # allocator already reserved this space through the state cache's
++        # `SlidingWindowMLASpec`, so the array costs no memory that the KV cache
++        # config did not already budget.
+         hca_state_layers: list[str] = []
+         for layer_name in state_layer_names:
++            if is_v41:
++                spec = layer_name_to_spec[layer_name]
++                _create_cache(
++                    (num_blocks, spec.block_size, spec.head_size),
++                    layer_name,
++                    dtype=t2j_dtype(spec.dtype),
++                )
++                layer_to_index[layer_name] = len(kv_caches) - 1
++                continue
+             kv_layer_name = self._ds_v4_compressed_kv_layer_name(layer_name)
+             if kv_layer_name not in layer_to_index:
+                 raise ValueError(
+diff --git a/tpu_inference/runner/tpu_runner.py b/tpu_inference/runner/tpu_runner.py
+index cc3ec658..2a413161 100644
+--- a/tpu_inference/runner/tpu_runner.py
++++ b/tpu_inference/runner/tpu_runner.py
+@@ -70,6 +70,8 @@ from tpu_inference.logger import init_logger
+ from tpu_inference.models.common.model_loader import get_model
+ from tpu_inference.models.jax.jax_intermediate_tensor import \
+     JaxIntermediateTensors
++from tpu_inference.models.vllm.experimental.engram_host_lookup import \
++    maybe_build_engram_host_lookup
+ from tpu_inference.runner import utils as runner_utils
+ from tpu_inference.runner.compilation_manager import CompilationManager
+ from tpu_inference.runner.decode_loop import TpuSamplingState, continue_decode
+@@ -1212,6 +1214,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
+                 logger.info("Loading drafter model...")
+                 self.drafter.load_model(self.state)
+ 
++        self.engram_host_lookup = maybe_build_engram_host_lookup(self.model)
++        self.engram_rows: jax.Array | None = None
+         self.model_fn = model.model_fn
+         self.compute_logits_fn = model.compute_logits_fn
+         self.pooler_fn = model.pooler_fn
+@@ -1662,6 +1666,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
+                      self.is_first_rank,
+                      self.is_last_rank,
+                      shared_attention_metadata=shared_attn_metadata,
++                     host_gathered_rows=self.engram_rows,
+                  )
+             if not self.is_last_rank:
+                 assert isinstance(hidden_states, JaxIntermediateTensors)
+@@ -2652,6 +2657,73 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
+                 seq_lens_subtract_indices, positions_subtract_indices)
+         return seq_lens, positions
+ 
++    def _engram_lookback(self, req_indices: np.ndarray, num_rows: int,
++                         depth: int) -> np.ndarray:
++        """The tokens just before each request's first scheduled token.
++
++        Returns [num_rows, depth] int32. Entry [row, k] is the token `k + 1`
++        positions before the first token this step schedules for that request,
++        or -1 when the request has no such token. A row past the end of
++        `req_indices` is a padding row and is all -1.
++
++        The n-gram that ends at a request's first scheduled token reaches back
++        into tokens this step does not schedule. Only the runner holds them.
++        """
++        lookback = np.full((num_rows, depth), -1, dtype=np.int32)
++        token_ids = self.input_batch.token_ids_cpu
++        computed = self.input_batch.num_computed_tokens_cpu
++        for row, req in enumerate(req_indices[:num_rows]):
++            start = int(computed[req])
++            take = min(depth, start)
++            if take > 0:
++                lookback[row, :take] = token_ids[req,
++                                                 start - take:start][::-1]
++        return lookback
++
++    def _gather_engram_rows(
++        self,
++        input_ids: np.ndarray,
++        positions: np.ndarray,
++        query_start_loc: np.ndarray,
++        req_indices_dp: List[np.ndarray],
++        dp_size: int,
++        tokens_per_dp_rank: int,
++        max_num_reqs_per_dp_rank: int,
++    ) -> Optional[jax.Array]:
++        """Gather this step's Engram rows on the host, or return None.
++
++        An Engram table is far larger than device memory allows, so it stays in
++        host memory and the step function cannot read it. Gather the rows here
++        instead, while the inputs are still host arrays, and hand them to the
++        step function. Returns None for a model with no such table, and for a
++        profile run, where the model reads no rows.
++
++        Each data-parallel rank owns one contiguous token range and its own
++        request rows, so hash one rank at a time. The gather then runs once, on
++        the joined hashes.
++        """
++        lookup = self.engram_host_lookup
++        if lookup is None or not lookup.ready():
++            return None
++
++        chunks = []
++        for dp_rank in range(dp_size):
++            token_start = dp_rank * tokens_per_dp_rank
++            loc_start = dp_rank * (max_num_reqs_per_dp_rank + 1)
++            chunks.append(
++                lookup.hashes(
++                    input_ids[token_start:token_start + tokens_per_dp_rank],
++                    positions[token_start:token_start + tokens_per_dp_rank],
++                    query_start_loc[loc_start:loc_start +
++                                    max_num_reqs_per_dp_rank + 1],
++                    self._engram_lookback(req_indices_dp[dp_rank],
++                                          max_num_reqs_per_dp_rank,
++                                          lookup.lookback_depth),
++                ))
++        return device_array(self.mesh,
++                            lookup.gather_rows(chunks),
++                            sharding=NamedSharding(self.mesh, PartitionSpec()))
++
+     def _prepare_inputs(self, scheduler_output: "VllmSchedulerOutput"):
+         total_num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
+         assert total_num_scheduled_tokens > 0
+@@ -2957,6 +3029,19 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
+                 ))
+             logits_indices_view[:] = spec_decode_metadata.final_logits_indices
+ 
++        # A model whose lookup table is too large for device memory keeps the
++        # table in host memory, where the step function cannot reach it. Gather
++        # its rows here, while the inputs are still host arrays.
++        self.engram_rows = self._gather_engram_rows(
++            np.asarray(input_ids_view)[:padded_total_num_scheduled_tokens],
++            positions,
++            np.asarray(query_start_loc_view),
++            req_indices_dp,
++            dp_size,
++            padded_num_scheduled_tokens_per_dp_rank,
++            max_num_reqs_per_dp_rank,
++        )
++
+         # Put to device
+         sampling_metadata = TPUSupportedSamplingMetadata.from_input_batch(
+             self.mesh,

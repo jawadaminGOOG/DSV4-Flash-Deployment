@@ -1,214 +1,109 @@
-# DeepSeek-V4-Flash on Google Cloud TPU v6e (Trillium)
+# DeepSeek-V4-Flash & DeepSeek-V4.1-Flash on Google Cloud TPU v6e (Trillium)
 
-High-throughput deployment and benchmark recipes for **DeepSeek-V4-Flash** (284B total / 13B active parameters, 256 MoE experts) on **Google Cloud TPU v6e**.
-
----
-
-## 1. Executive Summary
-
-DeepSeek-V4-Flash uses a 256-expert Mixture-of-Experts (MoE) architecture with Compressed Sparse Attention (CSA) and Heavily Compressed Attention (HCA).
-
-This repository configures **16-way Data-Parallel (DP) Attention**, **Collective Matmul V2 overlap**, **INT8 MoE quantization**, and **FP8 KV caching**. A single **16-chip TPU v6e slice (4x4 optical torus)** achieves:
-
-* **7,065.0 output tokens/sec** at concurrency $C=512$ ($441.6\text{ tok/s per chip}$).
-* **14,130.1 aggregate tokens/sec** (prompt + generation).
-* **100% request success rate** across all concurrency tiers with exact token validation.
+Production deployment manifests, custom Pallas/SparseCore TPU kernels, full three-workload concurrency sweeps (`1k/1k`, `8k/1k`, `1k/8k` across `C=1..512`), GPQA Diamond evaluations, and XProf kernel analyses for both **DeepSeek-V4-Flash (`284B` total / `13B` active, `256` experts)** and **DeepSeek-V4.1-Flash (`552B` total / `16B` active, `384` experts)** on a single **16-chip TPU v6e slice (`4×4` optical torus)**.
 
 ---
 
-## 2. Benchmark Results
+## 1. Executive Summary: Two Models on One 16-Chip TPU v6e Slice
 
-### 2.1 Concurrency Scaling Sweep (TPU v6e-16)
-
-Workload parameters:
-* **Input Sequence Length (ISL)**: 1,024 prompt tokens
-* **Output Sequence Length (OSL)**: 1,024 generated tokens
-* **Serving Mode**: Streaming Server-Sent Events (SSE), `temperature=0.0`, `ignore_eos=True`, burst arrival (`rate=inf`)
-* **Hardware**: 16x TPU v6e chips (4 nodes $\times$ 4 chips, 4x4 2D Torus optical interconnect)
-
-| Concurrency ($C$) | Total Requests | Output Throughput | Per-Chip Output | Aggregate Throughput | TTFT P50 | TTFT P90 | TPOT (Mean) | Stream Speed |
-| :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
-| **16** | 32 / 32 | **507.0 tok/s** | 31.7 tok/s | **1,014.1 tok/s** | 1,429.1 ms | 1,536.4 ms | **57.12 ms** | 17.5 tok/s |
-| **32** | 32 / 32 | **957.6 tok/s** | 59.8 tok/s | **1,915.1 tok/s** | 2,465.5 ms | 2,608.3 ms | **52.56 ms** | 19.0 tok/s |
-| **64** | 64 / 64 | **1,811.9 tok/s** | 113.2 tok/s | **3,623.8 tok/s** | 3,089.2 ms | 3,252.0 ms | **55.25 ms** | 18.1 tok/s |
-| **128** | 128 / 128 | **3,355.0 tok/s** | 209.7 tok/s | **6,710.1 tok/s** | 4,124.5 ms | 5,259.5 ms | **62.95 ms** | 15.9 tok/s |
-| **256** | 256 / 256 | **5,504.4 tok/s** | 344.0 tok/s | **11,008.9 tok/s** | 7,023.0 ms | 9,813.7 ms | **70.00 ms** | 14.3 tok/s |
-| **512** | 512 / 512 | **7,065.0 tok/s** | **441.6 tok/s** | **14,130.1 tok/s** | **11,885.6 ms** | **21,681.1 ms** | **103.15 ms** | **9.7 tok/s** |
+| Metric / Feature | [`DeepSeek-V4-Flash` (`284B`)](./models/DeepSeekV4-Flash-v6e16/README.md) | [`DeepSeek-V4.1-Flash` (`552B`)](./models/DeepSeekV4.1-Flash-v6e16/README.md) |
+|---|---|---|
+| **Architecture** | `284B` total / `13B` active, `256` routed experts (`top_k=8`), CSA + HCA | `552B` total / `16B` active, `384` routed experts (`top_k=6`), Ratio-2 CSA2 + SWA + 4-stream `mHC` + Host-Offloaded Engram (`1` & `14`) |
+| **Quantization on TPU v6e** | **INT8 MoE** (native v6e INT8 MXU) + **FP8** Dense & KV Cache | **MXFP4 MoE** (`4.25 bits/w` in HBM, VMEM `bf16` dequant in `gmm_v2`) + **FP8** Dense & KV Cache |
+| **Resident HBM Weight Footprint** | **197.1 GiB** across 16 chips (`12.3 GiB/chip`) | **378.78 GiB** across 16 chips (`23.7 GiB/chip`) + **94.42 GiB/rank** Engram pinned in host DRAM |
+| **`1k/1k` Balanced Peak Output (`C=512`)** | **8,463.7 out tok/s** (`16,906.7` total tok/s; `529.0 tok/s/chip`) | **5,137.3 out tok/s** (`2K` ctx) / **4,310.5 out tok/s** (`16K` ctx; **8,140.0 tok/s** steady-state decode) |
+| **`8k/1k` Prefill-Heavy Peak (`C=512`)** | **1,758.5 out tok/s** (`17,585.3` total tok/s) | **1,234.6 out tok/s** (`11,109.1` total tok/s; **14,704.2 tok/s** peak engine prefill) |
+| **`1k/8k` Reasoning Peak (`9,216` tok/req)** | **8,067.9 out tok/s** (`@ C=512`, `40.32 ms` TPOT) | **3,980.0 out tok/s** (`@ C=256`, `62.9 ms` TPOT; **6,294.9 tok/s** steady-state decode `@ C=512`) |
+| **GPQA Diamond Accuracy (`n=198`, `16K` ctx)** | Greedy parity `16/16` byte-identical against unpatched control | **83.2% (`164/197`) unconditional Pass@1** / **94.8% (`164/173`) on completed chains**, **0% (`0/197`) loops** |
+| **Request Reliability (`C=1..512`)** | **100%** (`3,079 / 3,079` across 30 points) | **100%** (`3,079 / 3,079` across 30 points at `16K` ctx + `1,028 / 1,028` at `2K` ctx) |
+| **Recipes & Kernel Work** | [`models/DeepSeekV4-Flash-v6e16/`](./models/DeepSeekV4-Flash-v6e16/README.md) | [`models/DeepSeekV4.1-Flash-v6e16/`](./models/DeepSeekV4.1-Flash-v6e16/README.md) · [`patches/`](./models/DeepSeekV4.1-Flash-v6e16/patches/README.md) · [`XProf Report`](./models/DeepSeekV4.1-Flash-v6e16/results/xprof_kernel_report.md) |
 
 ---
 
-### 2.2 Direct Comparison vs. NVIDIA GH200
+## 2. Combined 3-Workload Performance Curves (`V4.1-Flash` vs `V4-Flash`, `C=1..512`)
 
-| Metric | Reference Baseline (4x NVIDIA GH200) | Google Cloud TPU v6e (16 Chips) |
+![All 3 Workloads Combined Overlay](./models/DeepSeekV4.1-Flash-v6e16/results/charts/v41-vs-v4-all-workloads.png)
+
+![All 3 Workloads 3x3 Grid](./models/DeepSeekV4.1-Flash-v6e16/results/charts/v41-vs-v4-3x3-grid.png)
+
+---
+
+## 3. Kernel-Specific Engineering & Optimization Linkage by Model
+
+### 3.1 DeepSeek-V4-Flash (`284B`) Kernel Optimizations
+Full recipe, ConfigMap patch, and sweep report: **[`models/DeepSeekV4-Flash-v6e16/README.md`](./models/DeepSeekV4-Flash-v6e16/README.md)** and **[`benchmark_sweep_report.md`](./models/DeepSeekV4-Flash-v6e16/results/benchmark_sweep_report.md)**.
+
+| Kernel / Subsystem | Source Target | What Changed & Measured Hardware Impact |
+|---|---|---|
+| **1. Below-v7 Expert INT8 Enablement** | `tpu_inference/layers/vllm/quantization/mxfp4.py` | Stock upstream `tpu-inference` cannot compile FP4 `gmm_v2` on TPU v6e (`Unsupported type 'vector<8x128x8xf4E2M1FN>'`). Requantizes routed experts to `int8` (`block_size=512`) at load time so `gmm_v2` runs on the v6e INT8 MXU (`1,836 TOPS/chip`, achieving `96.6%` of peak HBM bandwidth at `11.93 ms/step`). |
+| **2. KV-Group Weakref Memoization of Compressor Metadata** | `tpu_inference/kernels/experimental/deepseek_v4/compressor/compressor_v1.py` | Hoists and memoizes compressed-attention scatter/boundary metadata once per KV-cache group (`3` builds per forward pass instead of `~60` across layers) using a `weakref` context key. Cuts `compressor_v1.py` from `6.47 ms/step` to **`0.31 ms/step` (`-14.7%` total decode step time)**. |
+| **3. SparseCore Offload for MoE Decode Combine** | `tpu_inference/kernels/sparse_core/ragged_gather_reduce_v2.py` | Lowers the TensorCore/SparseCore dispatch crossover threshold so the post-expert token combine (`ragged_gather_reduce_v2`) executes on TPU v6e's dual SparseCores concurrently with TensorCore ops. Collapses MoE combine time on the critical path from `8.34 ms/step` to **`1.45 ms/step` (`-82.6%`)**, lifting `C=512` serving throughput to **`8,463.7 tok/s` (`+19.8%` vs unpatched `7,065.0 tok/s`)**. |
+
+### 3.2 DeepSeek-V4.1-Flash (`552B`) TPU Backend & Kernel Engineering (`20` Patches)
+Full recipe, 20-patch queue (`0001..0018` `tpu-inference` + `2` `vLLM`), and XProf waterfall: **[`models/DeepSeekV4.1-Flash-v6e16/README.md`](./models/DeepSeekV4.1-Flash-v6e16/README.md)**, **[`patches/README.md`](./models/DeepSeekV4.1-Flash-v6e16/patches/README.md)**, and **[`xprof_kernel_report.md`](./models/DeepSeekV4.1-Flash-v6e16/results/xprof_kernel_report.md)**.
+
+| Kernel / Subsystem | Patch Link | What Changed & Measured Hardware Impact |
+|---|---|---|
+| **1. Removal of Unweighted Query `RMSNorm` (`qnorm`) in V4.1 Attention** | [`0018-fix-dsv41-remove-unweighted-per-head-RMSNorm...patch`](./models/DeepSeekV4.1-Flash-v6e16/patches/tpu-inference/0018-fix-dsv41-remove-unweighted-per-head-RMSNorm-qnorm-f.patch) | **Primary full-context (`16K`) accuracy fix.** Replaced `rope_kernel.qnorm_rope` (inherited from V4.0) with `rope_kernel.rope` in `deepseek_v41_attention.py:387` matching `deepseek-inference/model.py:772`. Eliminates unit-RMS query distortion against `attn_sink`, taking GPQA Diamond to **83.2% unconditional / 94.8% completed Pass@1** with **0/197 loops**. |
+| **2. Split Byte-Plane Compressed RoPE Record** | [`0007-Write-the-compressed-RoPE-record...patch`](./models/DeepSeekV4.1-Flash-v6e16/patches/tpu-inference/0007-Write-the-compressed-RoPE-record-in-the-byte-plane-l.patch), [`0008`](./models/DeepSeekV4.1-Flash-v6e16/patches/tpu-inference/0008-Test-that-the-RoPE-record-decodes-the-way-the-gather.patch) | Aligns `deepseek_v41_compressor.py` RoPE storage with `csa_gather`'s two-byte-plane decode (`high` byte at `i`, `low` byte at `64 + i` $\rightarrow$ `(high << 8) \| low`). |
+| **3. Exclusive Compressed Causal Bound & Chronological `streamindex_topk`** | [`0013`](./models/DeepSeekV4.1-Flash-v6e16/patches/tpu-inference/0013-Fix-the-indexer-causal-bound-for-compressed-KV-state.patch), [`0014`](./models/DeepSeekV4.1-Flash-v6e16/patches/tpu-inference/0014-Implement-short-context-indexer-bypass-matching-refe.patch), [`0015`](./models/DeepSeekV4.1-Flash-v6e16/patches/tpu-inference/0015-Import-lax-and-sort-streamindex_topk-outputs-chronol.patch) | Fixes `streamindex_topk.py` Pallas causal mask to `k_span < (q_pos + 1) // ratio`, adds short-context bypass (`< 1,024` tokens), and sorts top-512 selected slots chronologically. |
+| **4. `float32` SWA/SparseMLA Merge & Page-Aligned `_start_offset`** | [`0016`](./models/DeepSeekV4.1-Flash-v6e16/patches/tpu-inference/0016-core_attention-retain-float32-accumulator-precision-.patch), [`0017`](./models/DeepSeekV4.1-Flash-v6e16/patches/tpu-inference/0017-Fix-mla_swa-page-aligned-_start_offset-and-deduplica.patch) | Retains `f32` accumulators across the `SWA` (`1.44 ms/step` decode) and `SparseMLA` merge boundary and deduplicates KV-cache DMA updates in `mla_swa.py`. |
+| **5. Native MXFP4 VMEM Dequant & Compact `[E, blocks, N]` Scale (`-47.46 GiB`)** | [`0001`](./models/DeepSeekV4.1-Flash-v6e16/patches/tpu-inference/0001-Quantization-Claim-every-DeepSeek-V4-family-model-ty.patch), [`0005`](./models/DeepSeekV4.1-Flash-v6e16/patches/tpu-inference/0005-Give-every-V4.1-sliding-window-layer-its-own-KV-cach.patch) | Keeps `384` routed experts in native 4-bit MXFP4 (`e2m1` + compact `u8` `e8m0` scale without second-minor broadcast padding, saving **`47.46 GiB` HBM** across 16 chips) and unpacks to `bf16` in VMEM inside `megablox/gmm_v2.py`. |
+| **6. Host-Pinned `94.42 GiB/rank` Engram Lookup & Per-Host RunAI Lock** | [`0005`](./models/DeepSeekV4.1-Flash-v6e16/patches/tpu-inference/0005-Give-every-V4.1-sliding-window-layer-its-own-KV-cach.patch), [`vllm/0001`](./models/DeepSeekV4.1-Flash-v6e16/patches/vllm/0001-engram-add-a-non-CUDA-reference-path.patch), [`vllm/0002`](./models/DeepSeekV4.1-Flash-v6e16/patches/vllm/0002-weight_utils-serialise-the-runai-streamer-per-host.patch) | Offloads the `203.1 GB` Engram tables (`layers 1 & 14`) to pinned host DRAM (`< 0.6 ms` host gather) and serializes per-host GCS weight loading via `/dev/shm/vllm_runai_streamer_host.lock`. |
+
+### 3.3 XProf Decode Breakdown & Next Hill-Climbing Targets (`DeepSeek-V4.1-Flash`)
+
+Full report: **[`models/DeepSeekV4.1-Flash-v6e16/results/xprof_kernel_report.md`](./models/DeepSeekV4.1-Flash-v6e16/results/xprof_kernel_report.md)**.
+
+![Decode Step Breakdown — V4.1-Flash vs V4-Flash](./models/DeepSeekV4.1-Flash-v6e16/results/charts/v41-xprof-decode-breakdown.png)
+
+| Priority | Target Subsystem | XProf Measured Cost (`C=256` Decode) | Mechanism & Optimization Path | Recoverable Band |
+|---:|---|---:|---|---:|
+| **#1** | `fused_moe_gmm.py:330` + `deepseek_v4.py:91` | **`16.05 ms/step`** (`24.7%` decode; `114.58 ms` = `42.4%` prefill) | `%all-reduce.52` (`bf16[256,5120]`, `2.62 MB`) takes `356.5 µs/layer` vs `25.9 µs` for `%all-gather.122` (`~306 µs/layer` barrier wait), and `%fusion.647` couples `shared_experts.down_proj` to `%all-reduce.52`. Enable SparseCore `ENABLE_RS_KERNEL=1` + decouple `%fusion.647`. | **`2.0 – 8.0 ms/step`** |
+| **#2** | `deepseek_v41_compressor.py:490` & `csa_gather.py:290` | **`4.40 ms/step`** (`6.8%` decode; `11.18 ms` prefill) | `.reshape(-1, 512)` on `u8[267,512,4,128]` (`69.98 MB`) changes minor tiling `T(4,128)(4,1) <-> T(8,128)(4,1)`, emitting physical `70 MB` HBM copies (`reshape.22232` & `reshape.23632`). Index 4D `cache` directly in Pallas. | **`2.5 – 3.1 ms/step`** |
+| **#3** | `megablox/gmm_v2.py` (`tm_256` / `e2m1_to_bf16`) | **`20.62 ms/step`** (`31.8%` decode vs `10.73 ms` HBM floor) | `m=1536` across `g=24` groups (`~64` rows/group) tiled at `tm=256` pads up to `6,144` rows/layer (`18.5 ms` MXU floor). Autotune decode `tm ∈ {16, 32}` and/or register-LUT `e2m1_to_bf16`. | **`2.0 – 9.0 ms/step`** |
+| **#4** | `deepseek_v41_indexer.py:291` & `streamindex_topk.py` | **`5.07 ms/step`** (`7.8%` decode; `14.74 ms` prefill) | Remove `jax.lax.cond` (`1.99 ms/step`) and bound Pallas `streamindex_topk` grid dynamically by `ceil_div(max_kv_len, block_k)` instead of sorting `s32[16, 18432]`. | **`1.0 – 3.0 ms/step`** |
+| **#5** | `vllm/.../kernels/mhc/torch.py` | **`1.07 ms/step`** (`7,398` launches/step = `43.6%` of all launches; `8.83 ms` prefill) | Fuse 4-stream `pre_mix` + `RMSNorm` + `post_mix` into a single Pallas VMEM kernel in `T(8,128)`. | **`0.7 – 1.6 ms/step`** |
+
+---
+
+## 4. Benchmark Tables (`DeepSeek-V4-Flash` vs `DeepSeek-V4.1-Flash`, `1k/1k`)
+
+| Concurrency ($C$) | V4-Flash Output (`tok/s`) | V4-Flash TPOT | V4.1-Flash (`2K` ctx) Output (`tok/s`) | V4.1 (`2K`) TPOT | V4.1-Flash (`16K` ctx) Output (`tok/s`) | V4.1 (`16K`) TPOT |
+| :---: | :---: | :---: | :---: | :---: | :---: | :---: |
+| **1** | 35.3 | 27.7 ms | 18.9 | 49.1 ms | 17.9 | 54.7 ms |
+| **2** | 70.7 | 27.8 ms | 39.5 | 49.6 ms | 35.4 | 55.5 ms |
+| **4** | 140.5 | 28.0 ms | 78.7 | 49.8 ms | 69.5 | 56.5 ms |
+| **8** | 277.5 | 28.4 ms | 154.4 | 50.8 ms | 144.4 | 54.4 ms |
+| **16** | 598.6 | 26.3 ms | 444.5 | 34.9 ms | 354.1 | 44.1 ms |
+| **32** | 1,125.4 | 26.9 ms | 821.6 | 37.0 ms | 655.0 | 46.7 ms |
+| **64** | 2,089.5 | 28.8 ms | 1,601.4 | 36.5 ms | 858.3 | 68.6 ms |
+| **128** | 4,113.0 | 28.6 ms | 2,778.7 | 40.0 ms | 2,017.6 | 57.1 ms |
+| **256** | 6,671.9 | 33.7 ms | 4,096.9 | 51.4 ms | 3,164.1 | 69.2 ms |
+| **512** | **8,463.7** | **50.2 ms** | **5,137.3** | **77.3 ms** | **4,310.5** | **94.8 ms** |
+
+---
+
+## 5. Hardware Reference & Cost Efficiency on TPU v6e-16
+
+| Property | TPU v6e-16 Value | Notes |
 | :--- | :--- | :--- |
-| **Hardware** | 4x NVIDIA GH200 (480GB HBM3e, 900 GB/s NVLink) | 16x Google TPU v6e (32GB HBM2e, 4x4 Optical Torus) |
-| **Quantization** | FP8 MoE + FP8 KV Cache | INT8 MoE + FP8 KV Cache |
-| **Workload** | $\text{ISL}=1024, \text{OSL}=1024, \text{ignore\_eos}=\text{True}$ | $\text{ISL}=1024, \text{OSL}=1024, \text{ignore\_eos}=\text{True}$ |
-| **Peak Output Throughput** | **17,634.0 tok/s** | **7,065.0 tok/s** |
-| **Aggregate Throughput** | ~35,268.0 tok/s | **14,130.1 tok/s** |
-| **Time Per Output Token (TPOT)**| ~28.0 ms (estimated) | **103.15 ms** |
-| **Request Success Rate** | 100% | **100% (512 / 512 completed)** |
+| **HBM Capacity** | `32 GB/chip` (`31.24 GiB` addressable) | `512 GB` (`499.84 GiB`) total across 16 chips |
+| **Memory Bandwidth** | `1,638 GB/s/chip` | `26.2 TB/s` aggregate across 16 chips |
+| **Compute Peak (INT8 / BF16)** | `1,836 TOPS` / `918 TFLOPS` per chip | `29.37 POPS` INT8 / `14.68 PFLOPS` BF16 aggregate |
+| **Interconnect (ICI)** | `800 Gbps` bidirectional per chip | Direct optical 2D `4×4` torus (`4 × ct6e-standard-4t`) |
 
----
-
-## 3. Cost & Economic Efficiency
-
-Comparison of output token throughput per dollar across Google Cloud pricing:
-
-| Hardware Platform | Hourly Cost | Peak Output tok/s | Cost per 1M Output Tokens | Output Tokens per $1.00 |
+| Model & Pricing Tier (`16 × TPU v6e`) | Hourly Slice Cost | Peak Output `tok/s` | Cost per `1M` Output Tokens | Output Tokens per `$1.00` |
 | :--- | :---: | :---: | :---: | :---: |
-| **TPU v6e-16 (3-Year Commitment)** | **$19.52 / hr** | **7,065.0** | **$0.77** | **1,302,000** |
-| **TPU v6e-16 (Spot / Flex-Start)** | **$21.60 / hr** | **7,065.0** | **$0.85** | **1,177,000** |
-| **TPU v6e-16 (On-Demand List)** | **$43.20 / hr** | **7,065.0** | **$1.70** | **589,000** |
-| **4x NVIDIA H200 (GCP On-Demand)** | $42.40 / hr | ~14,000.0 (est) | **$0.84** | **1,189,000** |
-
-### Key Takeaways
-* **Competitive Economics**: On spot or 3-year commitment tiers ($19.52 – $21.60/hr for 16 chips), TPU v6e serves DeepSeek-V4-Flash at **$0.77 – $0.85 per 1M output tokens** (>1.17M – 1.30M tokens/$).
-* **Integrated Interconnect**: The native 2D optical torus (ICI) interconnect removes external InfiniBand network switch costs.
+| **DeepSeek-V4-Flash (`284B`, 3-Yr CUD)** | `$19.52 / hr` | `8,463.7` | **`$0.64`** | **`1,561,000`** |
+| **DeepSeek-V4-Flash (`284B`, Spot)** | `$21.60 / hr` | `8,463.7` | **`$0.71`** | **`1,411,000`** |
+| **DeepSeek-V4.1-Flash (`552B`, 3-Yr CUD)** | `$19.52 / hr` | `5,137.3` (`8,140` decode) | **`$1.06`** (`$0.67` decode) | **`947,000`** (`1,500,000` decode) |
+| **DeepSeek-V4.1-Flash (`552B`, Spot)** | `$21.60 / hr` | `5,137.3` (`8,140` decode) | **`$1.17`** (`$0.74` decode) | **`856,000`** (`1,356,000` decode) |
 
 ---
 
-## 4. Serving Architecture & Optimizations
+## 6. Repository Directory Structure
 
-### 4.1 16-way Data-Parallel (DP) Attention
-Standard Tensor Parallelism requires all-reduce communication during every decode step.
-With `enable_dp_attention: true`:
-* Attention layers shard request sequences across the 16 TPU chips independently (`mesh(attn_dp=16)`).
-* Each chip computes attention locally without cross-chip communication during decode steps.
-
-### 4.2 Collective Matmul V2 Overlapping
-MoE token routing requires all-gather and reduce-scatter collective communications.
-With the following flag:
-```bash
-LIBTPU_INIT_ARGS="--xla_tpu_all_gather_collective_matmul_mode=post_spmd --xla_tpu_reduce_scatter_collective_matmul_mode=post_spmd"
-```
-The XLA compiler overlaps inter-chip communication directly with Matrix Multiply Unit (MXU) computation.
-
-### 4.3 Memory Allocation
-* **INT8 MoE Weights**: The 256 routed experts occupy **23.65 GB per chip** on 16 chips.
-* **FP8 KV Cache**: FP8 format reduces KV cache memory consumption by 50% compared to BF16.
-* **Memory Limits**: The configuration `--max-model-len 2048`, `--max-num-seqs 512`, and `--gpu-memory-utilization 0.85` reserves **26.68 GB** of static state, leaving roughly **4.56 GB of free HBM headroom** per chip.
-* **Headroom caveat**: That margin is thin, and a single startup allocation consumes most of it transiently. Sampling pre-compilation builds a dummy logits tensor of shape `(max_num_seqs × dp_size, vocab_size)` in float32 — at `--max-num-seqs 512`, 16-way DP attention and a 129,280-token vocabulary, that is `(8192, 129280)`, or **3.95 GiB** — as a single contiguous buffer on one chip, and only then shards it (to 253 MiB per chip). The buffer is released before serving, so it is a peak rather than a resident cost, but it leaves only ~600 MB of slack at the moment it exists.
-* Separately, under the C=512 tier the TPU runtime does hit `RESOURCE_EXHAUSTED` on individual program loads and recovers via `ExecutePrepareWithOomRetries` (defragment and retry). No request failed as a result, but the retries stall the step and contribute to the gap between steady-state decode rate and end-to-end throughput. Lower `--gpu-memory-utilization` if you need a larger margin.
-* **`--max-num-seqs 512` is a ceiling, not a preference.** That buffer scales linearly with the flag, so `--max-num-seqs 1024` asks for 7.89 GiB and the engine fails to start with `RuntimeBufferAllocationFailure`. Separately, the KV cache holds `81,427 tokens` per chip — 1,302,832 across the slice, or **636 concurrent sequences at the full 2,048-token context** — so values much above ~640 could not be filled at this context length in any case.
-
----
-
-## 5. Hardware Reference: TPU v6e (Trillium)
-
-| Property | Value | Notes |
-| :--- | :--- | :--- |
-| **HBM Capacity** | 32 GB per chip (31.24 GB addressable) | 512 GB total for 16 chips |
-| **Memory Bandwidth** | 1,638 GB/s per chip | 26.2 TB/s aggregate for 16 chips |
-| **Compute Peak (INT8)** | 1,836 TOPS per chip | 29.37 POPS aggregate for 16 chips |
-| **Compute Peak (BF16)** | 918 TFLOPS per chip | 14.68 PFLOPS aggregate for 16 chips |
-| **Interconnect (ICI)** | 800 Gbps bidirectional per chip | Direct optical links forming 2D torus |
-| **Topology** | 4x4 Torus (4 nodes $\times$ 4 chips) | Multi-host Ray cluster over VPC |
-
----
-
-## 6. Instructions for Deployment and Benchmarking
-
-Find all deployment manifests and benchmark scripts in the [`recipes/`](./recipes) directory:
-* [`recipes/dsv4-flash-v6e16.yaml`](./recipes/dsv4-flash-v6e16.yaml): Kubernetes headless service and multi-host Job.
-* [`recipes/benchmark.py`](./recipes/benchmark.py): Async streaming benchmark script.
-
-### 6.1 Prerequisites
-1. Create a Google Kubernetes Engine (GKE) cluster with a 16-chip TPU v6e node pool:
-   ```bash
-   gcloud container node-pools create dsv4-v6e16-pool \
-     --cluster=<YOUR_CLUSTER_NAME> \
-     --zone=<YOUR_ZONE> \
-     --node-locations=<YOUR_ZONE> \
-     --machine-type=ct6e-standard-4t \
-     --num-nodes=4 \
-     --tpu-topology=4x4
-   ```
-2. Store DeepSeek-V4-Flash model weights in a Google Cloud Storage bucket (for example, `gs://<YOUR_GCS_BUCKET>/deepseek-v4-flash`).
-3. Prepare a container image that contains JAX/XLA, vLLM, and TPU dependencies.
-4. Grant the pods read access to the bucket through Workload Identity. The manifest creates the
-   Kubernetes service account `dsv4-sa`; bind it to a Google service account that can read the
-   checkpoint:
-   ```bash
-   gcloud storage buckets add-iam-policy-binding gs://<YOUR_GCS_BUCKET> \
-     --member="serviceAccount:<YOUR_GOOGLE_SERVICE_ACCOUNT>" \
-     --role=roles/storage.objectViewer
-
-   gcloud iam service-accounts add-iam-policy-binding <YOUR_GOOGLE_SERVICE_ACCOUNT> \
-     --role=roles/iam.workloadIdentityUser \
-     --member="serviceAccount:<YOUR_PROJECT>.svc.id.goog[default/dsv4-sa]"
-   ```
-   Then replace `<YOUR_GOOGLE_SERVICE_ACCOUNT>` in the `ServiceAccount` annotation in
-   [`recipes/dsv4-flash-v6e16.yaml`](./recipes/dsv4-flash-v6e16.yaml).
-
----
-
-### 6.2 Deploy the Serving Cluster
-
-1. Update the image and storage bucket in [`recipes/dsv4-flash-v6e16.yaml`](./recipes/dsv4-flash-v6e16.yaml):
-   * Replace `<YOUR_CONTAINER_REGISTRY>` with your container registry URI.
-   * Replace `<YOUR_GCS_BUCKET>` with your GCS bucket path.
-
-2. Apply the Kubernetes manifest:
-   ```bash
-   kubectl apply -f recipes/dsv4-flash-v6e16.yaml
-   ```
-
-3. Monitor pod status:
-   ```bash
-   kubectl get pods -l app=dsv4-v6e16 -o wide
-   kubectl logs dsv4-v6e16-0 --tail=50 -f
-   ```
-
-   > **Expect a long first start.** On a cold node pool the engine spends roughly **46 minutes** in
-   > `init engine (profile, create kv cache, warmup model)`, almost all of it XLA compilation,
-   > before `Application startup complete`. Size any liveness or readiness probe accordingly.
-   > `JAX_COMPILATION_CACHE_DIR` is set to `/jaxcache` so subsequent starts on the same node reuse
-   > the compiled artifacts: with that cache warm the same step takes about **6.5 minutes**
-   > (`init engine ... took 390.13 s (compilation: 372.57 s)`). The cache lives on a `hostPath`, so
-   > it survives pod restarts but not node replacement.
-
-4. Verify server readiness:
-   ```bash
-   kubectl exec dsv4-v6e16-0 -- curl -s http://127.0.0.1:8000/v1/models
-   ```
-
----
-
-### 6.3 Run the Benchmark Suite
-
-1. Forward port 8000 to your local machine:
-   ```bash
-   kubectl port-forward dsv4-v6e16-0 8000:8000
-   ```
-
-2. Run the concurrency sweep script:
-   ```bash
-   python3 recipes/benchmark.py \
-     --host 127.0.0.1 \
-     --port 8000 \
-     --model deepseek-ai/DeepSeek-V4-Flash \
-     --isl 1024 \
-     --osl 1024 \
-     --concurrencies 16 32 64 128 256 512 \
-     --num-chips 16 \
-     --output-json results.json
-   ```
-
----
-
-## 7. Directory Structure
-
-```
-├── README.md                          # Project documentation and benchmark report
-└── recipes/
-    ├── dsv4-flash-v6e16.yaml          # Kubernetes Job and Service for TPU v6e-16
-    ├── benchmark.py                   # Async streaming benchmark suite
-    └── publish_to_ubench.py           # Publishes results.json to the UBench BigQuery backend
-```
-
----
-
-## 8. License
-
-This repository is available under the Apache 2.0 License.
+- **[`models/DeepSeekV4-Flash-v6e16/`](./models/DeepSeekV4-Flash-v6e16/README.md)** — Serving manifest (`dsv4-flash-v6e16-serving.yaml` with ConfigMap patches), 3-shape concurrency sweep (`1k/1k`, `8k/1k`, `1k/8k`), raw JSONs, and charts for `DeepSeek-V4-Flash` (`284B`).
+- **[`models/DeepSeekV4.1-Flash-v6e16/`](./models/DeepSeekV4.1-Flash-v6e16/README.md)** — Serving manifest (`dsv41-flash-v6e16-serving.yaml`), [`patches/`](./models/DeepSeekV4.1-Flash-v6e16/patches/README.md) (`18` `tpu-inference` + `2` `vLLM` patches + `apply.sh`), 3-shape concurrency sweeps, 198-question GPQA Diamond results, and [`results/xprof_kernel_report.md`](./models/DeepSeekV4.1-Flash-v6e16/results/xprof_kernel_report.md) for `DeepSeek-V4.1-Flash` (`552B`).
+- **[`recipes/`](./recipes/)** — Quick-start single-file Kubernetes template and async streaming benchmark client.
