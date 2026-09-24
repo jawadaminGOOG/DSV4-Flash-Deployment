@@ -81,14 +81,7 @@ Crucially, because all 8 tokens in a `DSpark` verification batch belong to the *
 
 All measurements were captured on `16 × TPU v6e` (`4 × ct6e-standard-4t`) and saved in [`results/megakernel_v6e16_results.json`](results/megakernel_v6e16_results.json).
 
-```mermaid
-xychart-beta
-    title "DeepSeek-V4.1-Flash Output Throughput (tok/s) on TPU v6e-16 across Concurrency"
-    x-axis ["C=1", "C=2", "C=4", "C=8", "C=16", "C=32", "C=64", "C=128", "C=190", "C=512"]
-    y-axis "Output Throughput (tok/s)" 0 --> 5500
-    line [26.8, 53.5, 106.9, 213.3, 421.0, 828.9, 1524.5, 2520.7, 4046.1, 5137.3]
-    line [425.5, 661.2, 976.6, 1210.5, 1427.0, 1239.8, 1291.5, 1291.5, 1291.5, 1291.5]
-```
+![DeepSeek-V4.1-Flash Megakernel vs. Batched XLA Throughput & Latency](results/charts/megakernel-vs-batched-xla.png)
 
 | Concurrency (`C`) | Baseline XLA (`tok/s` / TPOT) | Optimized Batched XLA (`tok/s` / TPOT) | Persistent Megakernel (`tok/s` / Step `ms`) | Megakernel + `DSpark` (`1+7`) (`tok/s` / Eff. TPOT) | Optimal Engine & Speedup |
 |---:|---:|---:|---:|---:|---|
@@ -147,6 +140,8 @@ megakernel-recipe/
 ├── scripts/
 │   └── benchmark_megakernel_v6e16.py         # End-to-end TPU v6e-16 verification & latency/throughput sweep
 └── results/
+    ├── charts/
+    │   └── megakernel-vs-batched-xla.png     # Dual-panel throughput & TPOT plot + hardware/config specs card
     └── megakernel_v6e16_results.json         # Measured TPU v6e-16 latency, VMEM footprint, and DSpark results
 ```
 

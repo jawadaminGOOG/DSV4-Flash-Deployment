@@ -178,3 +178,12 @@ This **3-instruction bitwise sequence** is **bit-for-bit identical (`max_abs_dif
 | **`512`** | `4,310.5 tok/s` (`5,137` peak) | **`4,512.0 tok/s`** (**`5,380` peak**) | **`+4.7%`** | `94.8 ms` | **`77.3 ms`** | **`-18.5%`** |
 
 All optimizations preserve **100% greedy determinism (`16/16` byte-for-bit identical trajectories)** and full-context **GPQA Diamond accuracy (`94.8%` on completed reasoning chains, `0.0%` repetition loops)**.
+
+---
+
+## 6. Dual-Regime Envelope: Batched XLA (`C >= 24`) vs. Persistent Pallas Megakernel (`C = 1..24`)
+
+At low concurrency (`C = 1..24`), per-kernel XLA dispatch barriers (`2,850` launches/step) and static `gmm_v2` weight streaming become the dominant bottleneck. Our companion **[`megakernel-recipe/`](../../megakernel-recipe/README.md)** fuses all 51 layers into a single persistent VMEM Pallas kernel (`12.99 / 16.00 MiB` VMEM) paired with `DSpark` (`1+7`) speculative decoding, reaching **`425.5 tok/s/req` (`2.35 ms/token`, `15.9×` faster at `C=1`)**:
+
+![DeepSeek-V4.1-Flash Megakernel vs. Batched XLA Throughput & Latency](../../megakernel-recipe/results/charts/megakernel-vs-batched-xla.png)
+
