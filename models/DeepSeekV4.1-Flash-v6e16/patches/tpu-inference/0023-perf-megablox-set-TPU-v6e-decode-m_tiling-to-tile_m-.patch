@@ -1,0 +1,71 @@
+From 090ea8ed60015503bf4616f4b6c06ca3fbaf96b1 Mon Sep 17 00:00:00 2001
+From: Jawad Amin <jawadamin@google.com>
+Date: Thu, 24 Sep 2026 01:52:49 +0000
+Subject: [PATCH 23/25] perf(megablox): set TPU v6e decode m_tiling to (tile_m=128, bucket_base=128)
+ tiling (tile_m=128, bucket_base=128) and bypass single-branch
+ lax.switch/lax.cond
+
+---
+ tpu_inference/kernels/megablox/gmm_v2.py | 21 ++++++++++++---------
+ 1 file changed, 12 insertions(+), 9 deletions(-)
+
+diff --git a/tpu_inference/kernels/megablox/gmm_v2.py b/tpu_inference/kernels/megablox/gmm_v2.py
+index ff3884d9..352b6679 100644
+--- a/tpu_inference/kernels/megablox/gmm_v2.py
++++ b/tpu_inference/kernels/megablox/gmm_v2.py
+@@ -693,8 +693,11 @@ def inner_kernel(
+         k_id = pl.program_id(2)
+         is_first_k_step = k_id == 0
+         is_last_k_step = k_id == (num_k - 1)
++        static_single_k = pl.cdiv(cfgs.dims.size_k, cfgs.tiles.tile_k) == 1
+ 
+-        if bucket_m == cfgs.tiles.tile_m:
++        if static_single_k:
++            matmul_first_last()
++        elif bucket_m == cfgs.tiles.tile_m:
+             lax.cond(
+                 is_first_k_step,
+                 lambda: lax.cond(is_last_k_step, matmul_first_last,
+@@ -709,8 +712,11 @@ def inner_kernel(
+     for bucket_idx in range(cfgs.tiles.tile_m // cfgs.tiles.bucket_base):
+         branches.append(
+             functools.partial(run_matmul_step, bucket_idx=bucket_idx))
+-    bucket_idx = (jnp.maximum(m_end_local, 1) - 1) // cfgs.tiles.bucket_base
+-    lax.switch(bucket_idx, branches)
++    if len(branches) == 1:
++        branches[0]()
++    else:
++        bucket_idx = (jnp.maximum(m_end_local, 1) - 1) // cfgs.tiles.bucket_base
++        lax.switch(bucket_idx, branches)
+ 
+ 
+ def fill_metadata(
+@@ -1107,22 +1113,19 @@ def calculate_tiling(
+     max_num_buckets = 4
+     bucket_base = tile_m
+     if dims.size_m <= 2048 and dims.size_group > 1:
+-        env_bbase = int(os.environ.get("VLLM_GMM_V2_DECODE_BUCKET_BASE", "0"))
+-        env_tm = int(os.environ.get("VLLM_GMM_V2_DECODE_TILE_M", "0"))
++        env_bbase = int(os.environ.get("VLLM_GMM_V2_DECODE_BUCKET_BASE", "128"))
++        env_tm = int(os.environ.get("VLLM_GMM_V2_DECODE_TILE_M", "128"))
+         if env_bbase > 0 and env_tm > 0:
+             bucket_base = min(env_bbase, env_tm, dims.size_m)
+             tile_m = min(env_tm, dims.size_m)
+             while (_gmm_vmem_estimate(tile_m, tile_n, tile_k) > vmem_limit_bytes
+                    and tile_m > bucket_base):
+                 tile_m -= bucket_base
++            bucket_base = min(bucket_base, tile_m)
+             return TileSizes(tile_m=tile_m,
+                              tile_k=tile_k,
+                              tile_n=tile_n,
+                              bucket_base=bucket_base)
+-        # Decode regime (avg tokens/group <= 64): use finer 32-row buckets up to 128
+-        if tile_m >= 64:
+-            bucket_base = 32
+-            tile_m = 32
+ 
+     for _ in range(1, max_num_buckets):
+         new_tile_m = tile_m + bucket_base
+-- 
+2.56.0.rc1.310.g51773c2048-goog
+

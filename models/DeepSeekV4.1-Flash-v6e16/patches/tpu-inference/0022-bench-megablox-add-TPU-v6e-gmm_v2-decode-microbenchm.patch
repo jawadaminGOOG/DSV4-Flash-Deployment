@@ -1,0 +1,285 @@
+From 6484160157d60ed8e15a5dff122e01a4225d5f21 Mon Sep 17 00:00:00 2001
+From: Jawad Amin <jawadamin@google.com>
+Date: Thu, 24 Sep 2026 01:27:50 +0000
+Subject: [PATCH 22/25] bench(megablox): add TPU v6e gmm_v2 decode microbenchmark
+ tpu_inference.kernels.megablox
+
+---
+ .../kernels/megablox/bench_gmm_v2_decode.py   | 265 ++++++++++++++++++
+ 1 file changed, 265 insertions(+)
+ create mode 100644 tpu_inference/kernels/megablox/bench_gmm_v2_decode.py
+
+diff --git a/tpu_inference/kernels/megablox/bench_gmm_v2_decode.py b/tpu_inference/kernels/megablox/bench_gmm_v2_decode.py
+new file mode 100644
+index 00000000..a78f69d7
+--- /dev/null
++++ b/tpu_inference/kernels/megablox/bench_gmm_v2_decode.py
+@@ -0,0 +1,265 @@
++#!/usr/bin/env python3
++"""gmm_v2 (tm x dtype) & decode_e2m1 Microbenchmark on TPU v6e.
++
++Sweeps tile_m in {8, 16, 32, 64, 128, 256} x {mxfp4, bf16} and bucket_base / decode_e2m1
++optimizations on DeepSeek-V4.1-Flash decode shapes:
++  - w13 (gate+up fused silu): (g=24, m=1536, k=5120, n=4608)
++  - w2  (down_proj):          (g=24, m=1536, k=2304, n=5120)
++Also compares outputs against bf16 reference dequantization and exports the winning
++(VLLM_GMM_V2_DECODE_TILE_M, VLLM_GMM_V2_DECODE_BUCKET_BASE) to GMM_WINNER_ENV.
++"""
++import json
++import os
++import time
++import jax
++import jax.numpy as jnp
++import numpy as np
++
++from tpu_inference.kernels.megablox import gmm_v2 as gmm_v2_mod
++from tpu_inference.kernels.megablox.gmm_v2 import (
++    Dimensions,
++    InputConfigs,
++    MXFP4_ENCODING,
++    TileSizes,
++    calculate_tiling,
++    gmm_v2,
++)
++
++
++def decode_e2m1_orig(code: jax.Array, dtype: jnp.dtype) -> jax.Array:
++    wide = code.astype(jnp.int32)
++    index = jax.lax.bitwise_and(wide, 7)
++    magnitude = 0.5 * index.astype(jnp.float32)
++    magnitude = jnp.where(index == 5, 3.0, magnitude)
++    magnitude = jnp.where(index == 6, 4.0, magnitude)
++    magnitude = jnp.where(index == 7, 6.0, magnitude)
++    return jnp.where(wide < 0, -magnitude, magnitude).astype(dtype)
++
++
++def decode_e2m1_fast(code: jax.Array, dtype: jnp.dtype) -> jax.Array:
++    """Bit-exact IEEE-754 construction of E2M1 in 1 where + shifts."""
++    wide = code.astype(jnp.int32)
++    index = jax.lax.bitwise_and(wide, 7)
++    sign_bit = jax.lax.bitwise_and(wide, 8) << 28
++    f32_bits = jnp.where(
++        index <= 1,
++        (-index) & 0x3F000000,
++        0x3F000000 + (index << 22),
++    ) | sign_bit
++    return jax.lax.bitcast_convert_type(f32_bits, jnp.float32).astype(dtype)
++
++
++def decode_e8m0_orig(scale: jax.Array, dtype: jnp.dtype) -> jax.Array:
++    exponent = scale.astype(jnp.float32) - 127
++    return jnp.exp2(exponent).astype(dtype)
++
++
++def decode_e8m0_fast(scale: jax.Array, dtype: jnp.dtype) -> jax.Array:
++    """Bit-exact IEEE-754 E8M0 decode via single shift << 23."""
++    f32_bits = scale.astype(jnp.int32) << 23
++    return jax.lax.bitcast_convert_type(f32_bits, jnp.float32).astype(dtype)
++
++
++def make_custom_tile_fn(forced_tm: int, forced_bucket_base: int | None = None):
++    def _tile_fn(
++        dims: Dimensions,
++        lhs_cfgs: InputConfigs,
++        rhs_cfgs: InputConfigs,
++        vmem_limit_bytes: int,
++        fuse_act: str | None = None,
++    ) -> TileSizes:
++        # Compute base tile_k and tile_n using large size_m so base_tiles uses standard tk/tn
++        dummy_dims = Dimensions(
++            size_m=max(dims.size_m, 4096),
++            size_k=dims.size_k,
++            size_n=dims.size_n,
++            size_group=dims.size_group,
++            size_lhs_group=dims.size_lhs_group,
++            size_lhs_sublane=dims.size_lhs_sublane,
++        )
++        base_tiles = calculate_tiling(dummy_dims, lhs_cfgs, rhs_cfgs, vmem_limit_bytes, fuse_act)
++        bbase = forced_bucket_base if forced_bucket_base is not None else min(forced_tm, 64)
++        bbase = max(8, min(bbase, forced_tm))
++        return TileSizes(
++            tile_m=forced_tm,
++            tile_k=base_tiles.tile_k,
++            tile_n=base_tiles.tile_n,
++            bucket_base=bbase,
++        )
++    return _tile_fn
++
++
++def benchmark_fn(fn, args, warmup=5, iters=30):
++    for _ in range(warmup):
++        out = fn(*args)
++    jax.block_until_ready(out)
++    t0 = time.perf_counter()
++    for _ in range(iters):
++        out = fn(*args)
++    jax.block_until_ready(out)
++    t1 = time.perf_counter()
++    return (t1 - t0) * 1e6 / iters, out
++
++
++def main():
++    print(f"JAX devices: {jax.devices()}")
++    # 1. Verify bit-exactness of decode_e2m1_fast and decode_e8m0_fast
++    codes = jnp.arange(-8, 8, dtype=jnp.int8).astype(jnp.int4)
++    ref_e2m1 = decode_e2m1_orig(codes, jnp.bfloat16)
++    fast_e2m1 = decode_e2m1_fast(codes, jnp.bfloat16)
++    diff_e2m1 = float(jnp.max(jnp.abs(ref_e2m1.astype(jnp.float32) - fast_e2m1.astype(jnp.float32))))
++    print(f"[Verify] decode_e2m1_fast vs orig max_abs_diff = {diff_e2m1:.6f} (values: {fast_e2m1.tolist()})")
++    assert diff_e2m1 == 0.0, f"decode_e2m1_fast mismatch: {ref_e2m1} vs {fast_e2m1}"
++
++    scales = jnp.arange(1, 255, dtype=jnp.uint8)
++    ref_e8m0 = decode_e8m0_orig(scales, jnp.bfloat16)
++    fast_e8m0 = decode_e8m0_fast(scales, jnp.bfloat16)
++    rel_e8m0 = float(jnp.max(jnp.abs(ref_e8m0.astype(jnp.float32) - fast_e8m0.astype(jnp.float32)) / jnp.maximum(jnp.abs(ref_e8m0.astype(jnp.float32)), 1e-38)))
++    print(f"[Verify] decode_e8m0_fast vs orig max_rel_diff = {rel_e8m0:.6f}")
++    assert rel_e8m0 == 0.0, "decode_e8m0_fast mismatch"
++
++    # 2. Construct DeepSeek-V4.1-Flash decode inputs (m=1536, g=24)
++    rng = np.random.default_rng(42)
++    raw_weights = rng.dirichlet(np.ones(24) * 3.5)
++    skewed_counts = np.round(raw_weights * 1536).astype(np.int32)
++    skewed_counts[-1] += 1536 - skewed_counts.sum()
++    assert skewed_counts.sum() == 1536
++    uniform_counts = np.full(24, 64, dtype=np.int32)
++
++    print(f"Skewed group sizes (sum={skewed_counts.sum()}, min={skewed_counts.min()}, max={skewed_counts.max()}): {skewed_counts.tolist()}")
++
++    m, g = 1536, 24
++    k_w13, n_w13 = 5120, 4608
++    k_w2, n_w2 = 2304, 5120
++
++    key = jax.random.PRNGKey(0)
++    lhs_w13 = jax.random.normal(key, (m, k_w13), dtype=jnp.bfloat16) * 0.1
++    lhs_w2 = jax.random.normal(key, (m, k_w2), dtype=jnp.bfloat16) * 0.1
++
++    rhs_w13_fp4 = jax.random.randint(key, (g, k_w13, n_w13), -8, 7, dtype=jnp.int8).astype(jnp.int4)
++    scale_w13 = jnp.full((g, k_w13 // 32, 1, n_w13), 125, dtype=jnp.uint8)
++    rhs_w13_bf16 = jax.random.normal(key, (g, k_w13, n_w13), dtype=jnp.bfloat16) * 0.02
++
++    rhs_w2_fp4 = jax.random.randint(key, (g, k_w2, n_w2), -8, 7, dtype=jnp.int8).astype(jnp.int4)
++    scale_w2 = jnp.full((g, k_w2 // 32, 1, n_w2), 125, dtype=jnp.uint8)
++    rhs_w2_bf16 = jax.random.normal(key, (g, k_w2, n_w2), dtype=jnp.bfloat16) * 0.02
++
++    gs_skewed = jnp.array(skewed_counts, dtype=jnp.int32)
++    gs_uniform = jnp.array(uniform_counts, dtype=jnp.int32)
++
++    results = []
++    ref_out_w13 = None
++    ref_out_w2 = None
++
++    for dist_name, gs in [("skewed", gs_skewed), ("uniform", gs_uniform)]:
++        print(f"\n=== Group Distribution: {dist_name} ===")
++        for dtype_name in ["mxfp4", "bf16"]:
++            for tm in [8, 16, 32, 64, 128, 256]:
++                bbase_candidates = [tm] if tm <= 64 else [32, 64, tm]
++                for bbase in bbase_candidates:
++                    for use_fast_e2m1 in ([False, True] if dtype_name == "mxfp4" else [False]):
++                        if use_fast_e2m1:
++                            gmm_v2_mod.decode_e2m1 = decode_e2m1_fast
++                            gmm_v2_mod.decode_e8m0 = decode_e8m0_fast
++                        else:
++                            gmm_v2_mod.decode_e2m1 = decode_e2m1_orig
++                            gmm_v2_mod.decode_e8m0 = decode_e8m0_orig
++
++                        tile_fn = make_custom_tile_fn(tm, bbase)
++                        try:
++                            if dtype_name == "mxfp4":
++                                fn_w13 = jax.jit(lambda x, w, s, g_s: gmm_v2(
++                                    x, w, g_s, rhs_scale=s, tile_info=tile_fn,
++                                    fuse_act="silu", rhs_encoding=MXFP4_ENCODING,
++                                ))
++                                fn_w2 = jax.jit(lambda x, w, s, g_s: gmm_v2(
++                                    x, w, g_s, rhs_scale=s, tile_info=tile_fn,
++                                    fuse_act=None, rhs_encoding=MXFP4_ENCODING,
++                                ))
++                                us_w13, out_w13 = benchmark_fn(fn_w13, (lhs_w13, rhs_w13_fp4, scale_w13, gs))
++                                us_w2, out_w2 = benchmark_fn(fn_w2, (lhs_w2, rhs_w2_fp4, scale_w2, gs))
++                                if dist_name == "skewed":
++                                    if ref_out_w13 is None:
++                                        ref_out_w13 = out_w13
++                                        ref_out_w2 = out_w2
++                                    max_err_w13 = float(jnp.max(jnp.abs(out_w13.astype(jnp.float32) - ref_out_w13.astype(jnp.float32))))
++                                    max_err_w2 = float(jnp.max(jnp.abs(out_w2.astype(jnp.float32) - ref_out_w2.astype(jnp.float32))))
++                                else:
++                                    max_err_w13 = 0.0
++                                    max_err_w2 = 0.0
++                            else:
++                                fn_w13 = jax.jit(lambda x, w, g_s: gmm_v2(
++                                    x, w, g_s, tile_info=tile_fn, fuse_act="silu",
++                                ))
++                                fn_w2 = jax.jit(lambda x, w, g_s: gmm_v2(
++                                    x, w, g_s, tile_info=tile_fn, fuse_act=None,
++                                ))
++                                us_w13, out_w13 = benchmark_fn(fn_w13, (lhs_w13, rhs_w13_bf16, gs))
++                                us_w2, out_w2 = benchmark_fn(fn_w2, (lhs_w2, rhs_w2_bf16, gs))
++                                max_err_w13 = 0.0
++                                max_err_w2 = 0.0
++
++                            total_29l_ms = (us_w13 + us_w2) * 29.0 / 1000.0
++                            row = {
++                                "dist": dist_name,
++                                "dtype": dtype_name,
++                                "tm": tm,
++                                "bucket_base": bbase,
++                                "fast_e2m1": use_fast_e2m1,
++                                "w13_us": round(us_w13, 2),
++                                "w2_us": round(us_w2, 2),
++                                "layer_us": round(us_w13 + us_w2, 2),
++                                "total_29l_ms": round(total_29l_ms, 3),
++                                "max_err_w13": round(max_err_w13, 6),
++                                "max_err_w2": round(max_err_w2, 6),
++                                "status": "OK",
++                            }
++                            print(
++                                f"  dist={dist_name:7s} dtype={dtype_name:5s} tm={tm:3d} bbase={bbase:3d} "
++                                f"fast_e2m1={str(use_fast_e2m1):5s} -> w13={us_w13:6.1f}us, w2={us_w2:6.1f}us, "
++                                f"sum={us_w13+us_w2:6.1f}us (29L={total_29l_ms:6.2f}ms) err=({max_err_w13:.4f},{max_err_w2:.4f})"
++                            )
++                            results.append(row)
++                        except Exception as e:
++                            row = {
++                                "dist": dist_name,
++                                "dtype": dtype_name,
++                                "tm": tm,
++                                "bucket_base": bbase,
++                                "fast_e2m1": use_fast_e2m1,
++                                "status": f"ERR: {type(e).__name__}: {str(e)[:120]}",
++                            }
++                            print(f"  dist={dist_name:7s} dtype={dtype_name:5s} tm={tm:3d} bbase={bbase:3d} -> SKIP ({row['status']})")
++                            results.append(row)
++
++    out_path = os.environ.get("GMM_BENCH_OUT", "/tmp/gmm_v2_microbench.json")
++    with open(out_path, "w") as f:
++        json.dump(results, f, indent=2)
++    print(f"\nSaved {len(results)} microbenchmark rows to {out_path}")
++
++    # Pick the fastest mxfp4 skewed configuration with max_err == 0
++    valid_mxfp4 = [
++        r for r in results
++        if r.get("status") == "OK"
++        and r.get("dist") == "skewed"
++        and r.get("dtype") == "mxfp4"
++        and r.get("fast_e2m1") is True
++        and r.get("max_err_w13", 1.0) == 0.0
++        and r.get("max_err_w2", 1.0) == 0.0
++    ]
++    if valid_mxfp4:
++        winner = min(valid_mxfp4, key=lambda r: r["layer_us"])
++        print(
++            f"\n[WINNER] tm={winner['tm']}, bucket_base={winner['bucket_base']}, "
++            f"fast_e2m1={winner['fast_e2m1']} -> w13={winner['w13_us']}us, w2={winner['w2_us']}us, "
++            f"layer_us={winner['layer_us']}us (29L={winner['total_29l_ms']}ms)"
++        )
++        winner_env_path = os.environ.get("GMM_WINNER_ENV", "/tmp/gmm_winner.env")
++        with open(winner_env_path, "w") as f:
++            f.write(f"export VLLM_GMM_V2_DECODE_TILE_M={winner['tm']}\n")
++            f.write(f"export VLLM_GMM_V2_DECODE_BUCKET_BASE={winner['bucket_base']}\n")
++        print(f"Wrote winning tiling env to {winner_env_path}")
++
++
++if __name__ == "__main__":
++    main()
+-- 
+2.56.0.rc1.310.g51773c2048-goog
+

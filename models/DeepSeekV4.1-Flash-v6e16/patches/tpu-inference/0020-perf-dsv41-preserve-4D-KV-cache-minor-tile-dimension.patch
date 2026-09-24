@@ -1,0 +1,122 @@
+From 23e3586fb01743c8f8451bc77bad26855a67bb60 Mon Sep 17 00:00:00 2001
+From: Jawad Amin <jawadamin@google.com>
+Date: Wed, 23 Sep 2026 20:17:57 +0000
+Subject: [PATCH 20/25] perf(dsv41): preserve 4D KV-cache minor tile dimensions via 3D bitcast and mode=drop scatter
+ dimensions and use mode=drop in compressor/indexer scatters
+
+---
+ tpu_inference/FORK_HEAD                       |  2 +-
+ .../deepseek_v41/deepseek_v41_compressor.py   | 46 +++++++++----------
+ .../deepseek_v41/deepseek_v41_indexer.py      | 18 ++++----
+ 3 files changed, 33 insertions(+), 33 deletions(-)
+
+diff --git a/tpu_inference/FORK_HEAD b/tpu_inference/FORK_HEAD
+index 90f0651e..6e94fdb1 100644
+--- a/tpu_inference/FORK_HEAD
++++ b/tpu_inference/FORK_HEAD
+@@ -1 +1 @@
+-a797deaf802f6f70c11191c03404001a4f2dada9
++b71210c3a25aadf3b807174ba1bd80acd1d3b61e
+diff --git a/tpu_inference/layers/vllm/custom_ops/experimental/deepseek_v41/deepseek_v41_compressor.py b/tpu_inference/layers/vllm/custom_ops/experimental/deepseek_v41/deepseek_v41_compressor.py
+index 2ea41a6f..0943d586 100644
+--- a/tpu_inference/layers/vllm/custom_ops/experimental/deepseek_v41/deepseek_v41_compressor.py
++++ b/tpu_inference/layers/vllm/custom_ops/experimental/deepseek_v41/deepseek_v41_compressor.py
+@@ -229,13 +229,10 @@ def pool_ratio_two(
+     store_slots = _paged_slots(block_tables, request_ids, positions % capacity,
+                                num_requests, capacity)
+     flat_ring = ring.reshape(-1, ring.shape[-1])
+-    # One row past the end absorbs the masked-out writes.
+     store_slots = jnp.where(store, store_slots, flat_ring.shape[0])
+-    flat_ring = jnp.concatenate(
+-        [flat_ring, jnp.zeros((1, flat_ring.shape[1]), flat_ring.dtype)],
+-        axis=0)
+-    flat_ring = flat_ring.at[store_slots].set(kv_score.astype(flat_ring.dtype))
+-    return latent, flat_ring[:-1].reshape(ring.shape)
++    flat_ring = flat_ring.at[store_slots].set(
++        kv_score.astype(flat_ring.dtype), mode="drop")
++    return latent, flat_ring.reshape(ring.shape)
+ 
+ 
+ def build_kv_records(
+@@ -473,24 +470,25 @@ class VllmDeepseekV41Compressor(DeepseekCompressor):
+                                          num_tokens)
+             states = positions // ratio
+ 
+-            def _scatter(cache, record):
+-                # Flatten by the record, not by the array's last axis. The
+-                # RoPE array holds its 128-byte record in one 128-byte lane,
+-                # and the NoPE array holds its 512-byte record in four of
+-                # them. Both then give one record for each row, and both give
+-                # the same page size, because both hold one record for each
+-                # state.
+-                flat = cache.reshape(-1, record.shape[-1])
+-                page_size = flat.shape[0] // cache.shape[0]
+-                slots = _paged_slots(block_tables, request_ids, states,
+-                                     num_requests, page_size)
+-                slots = jnp.where(closes_group, slots, flat.shape[0])
+-                flat = jnp.concatenate(
+-                    [flat, jnp.zeros((1, flat.shape[1]), flat.dtype)], axis=0)
+-                return flat.at[slots].set(record)[:-1].reshape(cache.shape)
+-
+-            return _scatter(nope_cache, nope_record), _scatter(
+-                rope_cache, rope_record)
++            page_size = nope_cache.shape[1]
++            slots = _paged_slots(block_tables, request_ids, states,
++                                 num_requests, page_size)
++            nope_flat = nope_cache.reshape(-1, nope_cache.shape[2],
++                                           nope_cache.shape[3])
++            valid_slots = jnp.where(closes_group, slots, nope_flat.shape[0])
++            updated_nope = nope_flat.at[valid_slots].set(
++                nope_record.reshape(-1, nope_cache.shape[2],
++                                    nope_cache.shape[3]),
++                mode="drop",
++            ).reshape(nope_cache.shape)
++
++            rope_flat = rope_cache.reshape(-1, rope_cache.shape[3])
++            updated_rope = rope_flat.at[valid_slots].set(
++                rope_record,
++                mode="drop",
++            ).reshape(rope_cache.shape)
++
++            return updated_nope, updated_rope
+ 
+         updated_nope, updated_rope = jax.shard_map(
+             _insert,
+diff --git a/tpu_inference/layers/vllm/custom_ops/experimental/deepseek_v41/deepseek_v41_indexer.py b/tpu_inference/layers/vllm/custom_ops/experimental/deepseek_v41/deepseek_v41_indexer.py
+index efc6e0a6..b0dade57 100644
+--- a/tpu_inference/layers/vllm/custom_ops/experimental/deepseek_v41/deepseek_v41_indexer.py
++++ b/tpu_inference/layers/vllm/custom_ops/experimental/deepseek_v41/deepseek_v41_indexer.py
+@@ -183,20 +183,22 @@ class VllmDeepseekV41Indexer(DeepseekV4Indexer):
+             record = record.at[:, :head_dim].set(values)
+             record = record.at[:, head_dim:head_dim + 1].set(encoded)
+ 
+-            # The cache is uint8 (pages, rows, packing, record_bytes). One
+-            # state occupies one record, so flatten every axis above the last.
++            # The cache is uint8 (pages, rows, packing, record_bytes). Keep the
++            # minor (packing=4, record_bytes=256) dimensions intact via a 3D
++            # view so XLA lowers the reshape to a zero-copy bitcast instead of
++            # a full-HBM T(4,128) <-> T(8,128) relayout copy.
+             page_size = cache.shape[1] * cache.shape[2]
+-            flat = cache.reshape(-1, cache.shape[-1])
+             slots = _paged_slots(block_tables, request_ids, positions // ratio,
+                                  num_requests, page_size)
+             closes_group = (positions + 1) % ratio == 0
+             closes_group &= _real_tokens(query_start_loc, request_ids,
+                                          num_tokens)
+-            slots = jnp.where(closes_group, slots, flat.shape[0])
+-            flat = jnp.concatenate(
+-                [flat, jnp.zeros((1, flat.shape[1]), flat.dtype)], axis=0)
+-            flat = flat.at[slots].set(record)
+-            return flat[:-1].reshape(cache.shape)
++            flat_3d = cache.reshape(-1, cache.shape[2], cache.shape[3])
++            row_slots = jnp.where(closes_group, slots // cache.shape[2],
++                                  flat_3d.shape[0])
++            lane_slots = slots % cache.shape[2]
++            return flat_3d.at[row_slots, lane_slots].set(
++                record, mode="drop").reshape(cache.shape)
+ 
+         wrapper_ctx.kv_caches[cache_index] = jax.shard_map(
+             _store,
+-- 
+2.56.0.rc1.310.g51773c2048-goog
+

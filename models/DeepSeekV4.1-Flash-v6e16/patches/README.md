@@ -1,14 +1,14 @@
 # Patches That Enable DeepSeek-V4.1-Flash on TPU v6e
 
-The stock serving image cannot run `deepseek-ai/DeepSeek-V4.1-Flash`. Twenty patches enable full-context (`16,384`-token) serving, accuracy, and throughput on TPU v6e-16: **eighteen against [tpu-inference](https://github.com/vllm-project/tpu-inference)** (`0001..0018`) and **two against [vLLM](https://github.com/vllm-project/vllm)** (`0001..0002`).
+The stock serving image cannot run `deepseek-ai/DeepSeek-V4.1-Flash`. Twenty-seven patches enable full-context (`16,384`-token) serving, accuracy, and XProf-driven kernel optimizations on TPU v6e-16: **twenty-five against [tpu-inference](https://github.com/vllm-project/tpu-inference)** (`0001..0025`) and **two against [vLLM](https://github.com/vllm-project/vllm)** (`0001..0002`).
 
-Every patch states its base commit and is verified to apply cleanly. Running `apply.sh` against fresh clones of `tpu-inference` (`f22b5068`) and `vllm` (`9b959b86`) produces a tree identical (`git diff` empty) to commit `d85ce9c1` on which the 3-workload concurrency sweeps, the 198-question GPQA Diamond evaluation, and the XProf profiles were measured.
+Every patch states its base commit and is verified to apply cleanly. Running `apply.sh` against fresh clones of `tpu-inference` (`f22b5068`) and `vllm` (`9b959b86`) produces commit `4b8edd8e` (`0001..0018` = `d85ce9c1` baseline; `0019..0025` = `4b8edd8e` XProf kernel optimizations).
 
 ## Base Commits
 
 | Repository | Base Commit | Date | Patched Head | Apply Command |
 |---|---|---|---|---|
-| `vllm-project/tpu-inference` | `f22b5068d9326e7899cd2fc8afd4de79f36d20f4` | 2026-09-09 | `d85ce9c1` (`18` patches) | `git am` |
+| `vllm-project/tpu-inference` | `f22b5068d9326e7899cd2fc8afd4de79f36d20f4` | 2026-09-09 | `4b8edd8e` (`25` patches) | `git am` |
 | `vllm-project/vllm` | `9b959b86577c082c0b2bf9e2c22263255a36ad83` | 2026-09-10 | `2` patches | `git apply` |
 
 ## Apply Them
@@ -31,7 +31,7 @@ for p in /path/to/patches/vllm/*.patch; do git -C vllm apply "$p"; done
 
 ---
 
-## What the 18 `tpu-inference` Patches Do
+## What the 25 `tpu-inference` Patches Do
 
 ### Foundations, Quantization, Backbone & Memory Layout (`0001`–`0008`)
 
@@ -53,6 +53,12 @@ for p in /path/to/patches/vllm/*.patch; do git -C vllm apply "$p"; done
 - **[`0016-core_attention-retain-float32-accumulator-precision-.patch`](tpu-inference/0016-core_attention-retain-float32-accumulator-precision-.patch)** — Retains `float32` softmax/output accumulator precision across the SWA and SparseMLA merge boundary instead of truncating intermediate attention outputs to `bfloat16` before log-sum-exp rescaling.
 - **[`0017-Fix-mla_swa-page-aligned-_start_offset-and-deduplica.patch`](tpu-inference/0017-Fix-mla_swa-page-aligned-_start_offset-and-deduplica.patch)** — Fixes `mla_swa.py` page-aligned `_start_offset` indexing and deduplicates redundant KV-cache DMA writes.
 - **[`0018-fix-dsv41-remove-unweighted-per-head-RMSNorm-qnorm-f.patch`](tpu-inference/0018-fix-dsv41-remove-unweighted-per-head-RMSNorm-qnorm-f.patch)** — **Primary full-context accuracy fix.** DeepSeek-V4.0 applied an unweighted per-head `RMSNorm` (`qnorm`) to queries after `wq_b`, whereas DeepSeek-V4.1 removed `qnorm` (`apply_q_norm = False` in `deepseek-inference/model.py:772` and `vllm/deepseek_v4_1/attention.py:881`). Calling `rope_kernel.qnorm_rope` forced every query head to unit RMS (`||q_h||_2 = sqrt(512)`), distorting `(q · k) / sqrt(512)` relative to the learned `attn_sink` denominator (`exp(attn_sink - m_curr)`) as context grew past 62 tokens. Switching `deepseek_v41_attention.py:387` to `rope_kernel.rope` restores 100% long-context recall (`55/55` diagnostic/needle checks) and `94.8%` completed-chain GPQA Diamond Pass@1 (`0/197` repetition loops).
+
+### XProf-Driven Kernel & Collective Optimizations (`0019`–`0025`)
+
+- **[`0019-perf-moe-decouple-shared_experts.down_proj-from-post.patch`](tpu-inference/0019-perf-moe-decouple-shared_experts.down_proj-from-post.patch)** — Decouples `shared_experts.down_proj` (`%fusion.647`) from the post-MoE `psum_scatter` via `jax.lax.optimization_barrier` and enables SparseCore `nd_reduce_scatter` offload (`--xla_tpu_enable_sparse_core_collective_offload_nd_reduce_scatter=true`), cutting decode step wall by `-5.76 ms/step` (`61.71 -> 55.95 ms/step`) and prefill step wall by `-25.12 ms/step` (`270.65 -> 245.53 ms/step`).
+- **[`0020-perf-dsv41-preserve-4D-KV-cache-minor-tile-dimension.patch`](tpu-inference/0020-perf-dsv41-preserve-4D-KV-cache-minor-tile-dimension.patch)** — Preserves the 4D KV-cache minor tile dimensions `(4, 128)` (`nope_cache`) and `(4, 256)` (`indexer` `cache`) via 3D `%bitcast` views (`(-1, 4, 128)` / `(-1, 4, 256)`) and replaces `jnp.concatenate` + `[:-1]` pad copies with `mode="drop"` scatters, eliminating `99.99%` of KV-cache HBM relayout copies (`2.5385 -> 0.0003 ms/step`).
+- **[`0021`](tpu-inference/0021-perf-megablox-bitwise-IEEE-754-decode_e2m1-e8m0-and-.patch)–[`0025`](tpu-inference/0025-perf-megablox-support-3D-compact_scale-E-num_blocks-.patch)** — Replaces the 12-op `decode_e2m1`/`decode_e8m0` VPU sequence in `tpu_inference/kernels/megablox/gmm_v2.py` with a 3-op bitwise IEEE-754 mantissa/exponent assembly (`max_abs_diff = 0.0`), locks in the TPU v6e hardware-microbenchmarked decode tiling `(tile_m=128, bucket_base=128)` (`1` bucket, bypassing `lax.switch`/`lax.cond`), wires `tpu_inference.kernels.megablox.gmm_v2` into `fused_moe_gmm.py`, and supports 3D `compact_scale` (`[E, num_blocks, N]`). Cuts single-layer `gmm_v2` `w13 + w2` by `-42.1%` in isolation (`3,361.9 -> 1,945.5 µs`) and lowers in-model median decode step wall to **`37.33 ms/step`** (`1,524.5 tok/s` at `C=64`, `+77.6%` over `d85ce9c1`).
 
 ---
 
