@@ -92,9 +92,9 @@ All measurements were captured on `16 × TPU v6e` (`4 × ct6e-standard-4t`) and 
 | **`16`** | `289.2 tok/s` (`55.3 ms`) | `421.0 tok/s` (`38.0 ms`) | **`1,148.6–1,427.0 tok/s`** (`13.93–11.21 ms`) | **`1,427.0 tok/s` (`11.21 ms`)** | **Megakernel (`3.4×` vs Opt. XLA)** |
 | **`32`** | `655.0 tok/s` (`46.7 ms`) | `828.9 tok/s` (`38.6 ms`) | `1,239.8–1,563.2 tok/s` (`25.81–20.47 ms` tiled) | `1,239.8 tok/s` (VMEM-tiled `2×B16`) | **Crossover Zone (`C* ≈ 24–32`)** |
 | **`64`** | `858.3 tok/s` (`68.6 ms`) | **`1,524.5 tok/s` (`39.2 ms`)** | `1,291.5 tok/s` (`49.55 ms` tiled `4×B16`) | `1,291.5 tok/s` (`49.55 ms` tiled) | **Optimized Batched XLA (`+18.0%` vs Megakernel, `+77.6%` vs Base)** |
-| **`128`** | `2,017.6 tok/s` (`57.1 ms`) | **`2,520.7 tok/s` (`45.3 ms`)** | `1,291.5 tok/s` (VMEM-tiled) | `1,291.5 tok/s` (VMEM-tiled) | **Optimized Batched XLA (`+95.2%` vs Megakernel, `+24.9%` vs Base)** |
-| **`190–256`** | `3,164.1–3,980.0 tok/s` | **`4,046.1 tok/s` engine (`44.6 ms`)** | `1,291.5 tok/s` (VMEM-tiled) | `1,291.5 tok/s` (VMEM-tiled) | **Optimized Batched XLA (`3.1×` vs Megakernel)** |
-| **`512`** | `4,310.5–5,137.3 tok/s` | **`5,137.3 tok/s`** | `1,291.5 tok/s` (VMEM-tiled) | `1,291.5 tok/s` (VMEM-tiled) | **Optimized Batched XLA (`4.0×` vs Megakernel)** |
+| **`128`** | `2,017.6 tok/s` (`57.1 ms`) | **`2,520.7 tok/s` (`45.3 ms`)** | `1,291.5 tok/s` (`99.1 ms` tiled `8×B16`) | `1,291.5 tok/s` (`99.1 ms` tiled) | **Optimized Batched XLA (`+95.2%` vs Megakernel, `+24.9%` vs Base)** |
+| **`190–256`** | `3,164.1–3,980.0 tok/s` | **`4,046.1 tok/s` engine (`44.6 ms`)** | `1,291.5 tok/s` (`198.2 ms` tiled `16×B16`) | `1,291.5 tok/s` (`198.2 ms` tiled) | **Optimized Batched XLA (`3.1×` vs Megakernel)** |
+| **`512`** | `4,310.5–5,137.3 tok/s` | **`5,137.3 tok/s` (`77.3 ms`)** | `1,291.5 tok/s` (`396.4 ms` tiled `32×B16`) | `1,291.5 tok/s` (`396.4 ms` tiled) | **Optimized Batched XLA (`4.0×` vs Megakernel)** |
 
 ---
 
