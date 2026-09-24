@@ -15,7 +15,7 @@ Why `DSpark` (`1 + 7 = 8` rows) unlocks `450–640+ tok/s` single-stream on TPU 
      experts per `EP=4` torus row (`~9.8 ms` verification step vs `~5.8 ms` at `B=1`).
   2. Proposing `7` draft tokens with the `1`-layer `DSpark` head costs only `~1.05 ms` total
      (`~150 us/draft-step`), so each `10.85 ms` (`draft + verify`) speculative cycle yields
-     `tau ≈ 4.35` accepted tokens -> **`~401 accepted output tok/s` (`21.9x` faster than `r45` `C=1`)**!
+     `tau ≈ 4.35` accepted tokens -> **`~401 accepted output tok/s` (`21.9x` faster than `baseline_xla` `C=1`)**!
 """
 
 from __future__ import annotations

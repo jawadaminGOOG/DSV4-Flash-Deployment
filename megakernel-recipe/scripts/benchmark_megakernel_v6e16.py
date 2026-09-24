@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 # Copyright 2026 DeepSeek-V4.1-Flash TPU Deployment Authors.
 # Apache-2.0 License.
-"""End-to-End Wave 9 Hardware Verification & Benchmark on 16-Chip TPU v6e (`4x4` Torus).
+"""End-to-End Pallas Megakernel Hardware Verification & Benchmark on 16-Chip TPU v6e (`4x4` Torus).
 
-Evaluates all 4 Wave 9 Gate Clauses (`Sub-waves 9.1 -> 9.5`) plus Negative Controls
+Evaluates all 4 Pallas Megakernel Gate Clauses (`Sub-waves 9.1 -> 9.5`) plus Negative Controls
 directly on the 4-host (`16 x TPU v6e`, `4x4` torus) GKE slice and saves a complete
 JSON + Markdown telemetry artifact.
 """
@@ -266,7 +266,7 @@ def main():
     mesh, proc_id = _init_distributed_16_chips()
     if proc_id == 0:
         print("=" * 88)
-        print("WAVE 9: DeepSeek-V4.1-Flash 51-Layer TPU v6e-16 (4x4 Torus) Megakernel + DSpark")
+        print("Pallas Megakernel: DeepSeek-V4.1-Flash 51-Layer TPU v6e-16 (4x4 Torus) Megakernel + DSpark")
         print("=" * 88)
 
     results = {}
@@ -570,7 +570,7 @@ def main():
             f"tau={primary_dspark['expected_accepted_tokens_tau']:.2f} accepted tokens/cycle = "
             f"{primary_dspark['accepted_output_tok_s']:.1f} accepted tok/s (alpha=0.80)!"
         )
-        out_path = Path("/tmp/wave9_v6e16_results.json")
+        out_path = Path("/tmp/megakernel_v6e16_results.json")
         out_path.write_text(json.dumps(results, indent=2))
         print(f"Saved complete telemetry JSON to {out_path}")
 

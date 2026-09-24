@@ -43,7 +43,7 @@ index 3ba275b9..4afb1c3f 100644
 +    #
 +    # The membership check above cannot see this. It asks whether a name was
 +    # claimed, not whether the value that landed is the value the checkpoint
-+    # holds, and sub-wave 7.2 passed on exactly that weaker question.
++    # holds, and initial smoke checks passed on exactly that weaker question.
 +    _MHC_LEAVES = ("hc_attn_scale", "hc_ffn_scale", "hc_attn_base",
 +                   "hc_ffn_base")
 +
