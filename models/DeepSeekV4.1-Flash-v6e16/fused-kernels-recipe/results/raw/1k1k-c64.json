@@ -1,0 +1,27 @@
+[
+ {
+  "concurrency": 64,
+  "num_prompts": 64,
+  "completed": 64,
+  "failed": 0,
+  "success_rate_pct": 100.0,
+  "first_error": null,
+  "wall_time_s": 37.65657659698627,
+  "output_tokens": 65536,
+  "output_throughput_tok_s": 1740.3600093919576,
+  "output_tok_s_per_chip": 108.77250058699735,
+  "requests_per_s": 1.6995703216718336,
+  "ttft_mean_ms": 2203.9249148419913,
+  "ttft_p50_ms": 2714.4531079975422,
+  "ttft_p90_ms": 3371.063057013089,
+  "tpot_mean_ms": 34.4657313847148,
+  "shape": "1k1k",
+  "label": "1k/1k (balanced)",
+  "isl_min": 1019,
+  "isl_max": 1024,
+  "osl": 1024,
+  "n_words": 710,
+  "requests_issued": 64,
+  "started_at": 1790281823.7231255
+ }
+]

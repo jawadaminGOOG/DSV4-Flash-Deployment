@@ -1,0 +1,88 @@
+From 4b8edd8e4c039f58007d404e112b8137a394bf89 Mon Sep 17 00:00:00 2001
+From: Jawad Amin <jawadamin@google.com>
+Date: Thu, 24 Sep 2026 03:19:56 +0000
+Subject: [PATCH 25/25] perf(megablox): support 3D compact_scale [E, num_blocks, N] in gmm_v2
+ to tpu_inference gmm_v2
+
+---
+ tpu_inference/kernels/megablox/gmm_v2.py | 28 ++++++++++++++++++++++--
+ 1 file changed, 26 insertions(+), 2 deletions(-)
+
+diff --git a/tpu_inference/kernels/megablox/gmm_v2.py b/tpu_inference/kernels/megablox/gmm_v2.py
+index 352b6679..8d178bd1 100644
+--- a/tpu_inference/kernels/megablox/gmm_v2.py
++++ b/tpu_inference/kernels/megablox/gmm_v2.py
+@@ -275,6 +275,7 @@ class InputConfigs:
+     # `uint8` when the scale holds an E8M0 exponent that the kernel must decode.
+     # A floating dtype means the scale already holds its own value.
+     scale_dtype: jnp.dtype | None = None
++    compact_scale: bool = False
+ 
+     @property
+     def should_dequantize_before_matmul(self) -> bool:
+@@ -358,6 +359,8 @@ class IndexMaps:
+         k_row = k_id * self.cfgs.tiles.tile_k
+         b_row = k_row // self.cfgs.rhs_cfgs.quant_block_size
+         b_tile_id = b_row // self.cfgs.num_quant_blocks_per_tile_k
++        if self.cfgs.rhs_cfgs.compact_scale:
++            return (group_id, b_tile_id, n_id)
+         return (group_id, b_tile_id, 0, n_id)
+ 
+     def out_index_map(self, n_id: jax.Array, gm_id: jax.Array, _: jax.Array):
+@@ -400,8 +403,21 @@ def generate_block_specs(
+             index_map.rhs_bias_index_map,
+         )
+     if cfgs.rhs_cfgs.has_scale:
++        if cfgs.rhs_cfgs.compact_scale:
++            rhs_scale_block_shape = (
++                None,
++                cfgs.num_quant_blocks_per_tile_k,
++                cfgs.tiles.tile_n,
++            )
++        else:
++            rhs_scale_block_shape = (
++                None,
++                cfgs.num_quant_blocks_per_tile_k,
++                1,
++                cfgs.tiles.tile_n,
++            )
+         rhs_scale_block_spec = pl.BlockSpec(
+-            (None, cfgs.num_quant_blocks_per_tile_k, 1, cfgs.tiles.tile_n),
++            rhs_scale_block_shape,
+             index_map.rhs_scale_index_map,
+         )
+ 
+@@ -491,6 +507,8 @@ def inner_kernel(
+                 # weight.
+                 compact_scale = decode_e8m0(tiled_rhs_ref.get_scale(),
+                                             cfgs.lhs_cfgs.dtype)
++                if compact_scale.ndim == 2:
++                    compact_scale = compact_scale[:, None, :]
+                 tiled_rhs_scale = jnp.broadcast_to(
+                     compact_scale, (num_blocks, rhs_qbs, rhs_tile_n))
+             else:
+@@ -1163,7 +1181,12 @@ def validate_inputs(
+         assert rhs_bias.shape == (size_group, 1, size_n)
+     if rhs_scale is not None:
+         num_quant_blocks = rhs_scale.shape[1]
+-        assert rhs_scale.shape == (size_group, num_quant_blocks, 1, size_n)
++        accepted = [
++            (size_group, num_quant_blocks, 1, size_n),
++            (size_group, num_quant_blocks, size_n),
++        ]
++        assert rhs_scale.shape in accepted, (
++            f"rhs_scale shape {rhs_scale.shape}. Expecting one of {accepted}")
+         assert size_k % num_quant_blocks == 0
+ 
+     assert group_offset.shape == (1, )
+@@ -1271,6 +1294,7 @@ def make_gmm_configs(
+         has_scale=has_scale,
+         encoding=rhs_encoding,
+         scale_dtype=None if rhs_scale is None else rhs_scale.dtype,
++        compact_scale=rhs_scale is not None and rhs_scale.ndim == 3,
+     )
+ 
+     if rhs_encoding == MXFP4_ENCODING:
+-- 
+2.56.0.rc1.310.g51773c2048-goog
+

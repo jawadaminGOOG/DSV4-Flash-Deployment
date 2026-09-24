@@ -1,0 +1,12 @@
+[ok        ] What is the capital of France? Answer in one word.
+             -> 'Paris'  (stop)
+[ok        ] What is 17 * 23? Reply with the number only.
+             -> '391'  (stop)
+[ok        ] Write a Python function `add` that returns the sum of a and b. Reply with code only.
+             -> 'def add(a, b):\n    return a + b'  (stop)
+[ok        ] Which planet is closest to the Sun? Answer in one word.
+             -> 'Mercury'  (stop)
+
+4/4 answers correct
+
+raw completion (informational): ' return a + b\n\ndef sub(a, b):\n    return a - b\n\ndef mul(a, b):\n   '

@@ -1,0 +1,71 @@
+From e29626f95a474a6b35b46dff2f21e3beab3f559a Mon Sep 17 00:00:00 2001
+From: Jawad Amin <jawadamin@google.com>
+Date: Thu, 17 Sep 2026 21:38:25 +0000
+Subject: [PATCH 17/18] Fix mla_swa page-aligned _start_offset and deduplicate
+ KV cache DMA updates
+
+---
+ tpu_inference/FORK_HEAD                       |  2 +-
+ .../deepseek_v4/core_attention/mla_swa.py     | 21 ++++++++++++-------
+ 2 files changed, 14 insertions(+), 9 deletions(-)
+
+diff --git a/tpu_inference/FORK_HEAD b/tpu_inference/FORK_HEAD
+index 8bc355c9..c3a8f7ff 100644
+--- a/tpu_inference/FORK_HEAD
++++ b/tpu_inference/FORK_HEAD
+@@ -1 +1 @@
+-1304b903db6eb155ef0efde6d82350a690f841ab
++f659dc26855265c002ab8d902605d65cad510655
+diff --git a/tpu_inference/kernels/experimental/deepseek_v4/core_attention/mla_swa.py b/tpu_inference/kernels/experimental/deepseek_v4/core_attention/mla_swa.py
+index 84c7487f..fe338310 100644
+--- a/tpu_inference/kernels/experimental/deepseek_v4/core_attention/mla_swa.py
++++ b/tpu_inference/kernels/experimental/deepseek_v4/core_attention/mla_swa.py
+@@ -137,8 +137,8 @@ def _mla_sliding_window_ragged_paged_attention_kernel(
+     page_size = logical_page_size
+ 
+     # Static upper bound on the number of bkv blocks any (seq, bq) block can
+-    # need
+-    max_bkv_blocks = cdiv(bq_sz + sliding_window - 1, bkv_sz)
++    # need when _start_offset is aligned down to page_size.
++    max_bkv_blocks = cdiv(page_size - 1 + bq_sz + sliding_window - 1, bkv_sz)
+     single_bkv_block = max_bkv_blocks == 1
+ 
+     start_seq_idx = start_end_seq_idx_ref[0]
+@@ -258,11 +258,13 @@ def _mla_sliding_window_ragged_paged_attention_kernel(
+         #   q_pos_min = kv_len - q_len + bq_idx * bq_sz
+         # and attends to keys k with 0 <= q_pos_min - k < sliding_window, so the
+         # first key it can ever need is q_pos_min - sliding_window + 1.
+-        return jnp.maximum(
++        # Align down to `page_size` so page_off == 0 for all HBM/VMEM DMAs.
++        raw_offset = jnp.maximum(
+             _get_kv_len(seq_idx) - _get_q_len(seq_idx) + bq_idx * bq_sz -
+             sliding_window + 1,
+             0,
+         )
++        return (raw_offset // page_size) * page_size
+ 
+     def _fetch_bkv(seq_idx, bkv_idx, bkv_sem_idx, start_offset, *, wait=False):
+         sem = sems.at[0, bkv_sem_idx]
+@@ -673,11 +675,14 @@ def _mla_sliding_window_ragged_paged_attention_kernel(
+                     seq_idx, bkv_idx, bkv_sem_idx, cur_start_offset)
+ 
+                 # Start updating bkv to kv cache if applicable.
+-                # Writing to the kv cache is idempotent, some kv segment may have been
+-                # inserted into the kv cache multiple times, but it won't affect the
+-                # correctness.
+-                # TODO: remove duplicated writes to the kv cache to improve performance.
+-                @pl.when(update_sz > 0)
++                # Only update when bq_idx == 0 or cur_start_offset advances to a new
++                # page window, avoiding redundant overlapping HBM DMA writes.
++                is_new_window = jnp.logical_or(
++                    bq_idx == 0,
++                    cur_start_offset != _start_offset(seq_idx, bq_idx - 1),
++                )
++
++                @pl.when(jnp.logical_and(update_sz > 0, is_new_window))
+                 def update_cur_bkv_to_cache():
+                     start_update_kv_cache(seq_idx, bkv_sem_idx, offset,
+                                           update_sz, vmem_start)
+-- 
+2.55.0.1082.g2b9226bbc0-goog
+

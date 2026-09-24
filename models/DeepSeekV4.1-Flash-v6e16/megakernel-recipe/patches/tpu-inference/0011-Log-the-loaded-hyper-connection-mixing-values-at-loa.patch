@@ -1,0 +1,92 @@
+From 624e19a1c48a406022e81b23de1a450a73a5e04c Mon Sep 17 00:00:00 2001
+From: Jawad Amin <jawadamin@google.com>
+Date: Thu, 17 Sep 2026 02:47:55 +0000
+Subject: [PATCH 11/18] Log the loaded hyper-connection mixing values at load
+ time
+
+The load-time check reports which declared parameters no checkpoint tensor
+claimed. It cannot report whether the value that landed is the value the
+checkpoint holds, and those are different questions: a parameter can be
+claimed by name and still carry whatever `torch.empty` returned.
+
+`hc_attn_base` and `hc_ffn_base` are gate logits. The checkpoint holds
+entries as low as -25.5, which shut a gate; a tensor of zeros opens every
+one of them halfway instead. That failure is quiet. The model still emits
+fluent text from its feed-forward prior while the attention branch reaches
+the residual stream at the wrong weight, which is indistinguishable from a
+model that answers confidently without reading its prompt.
+
+Log the four mixing leaves for four layers after the load, so the values
+can be compared against the same tensors read out of the checkpoint. The
+dump reads parameters that already exist and adds no operation to the
+traced graph, so a run that carries it still hits the compile cache.
+---
+ .../models/vllm/experimental/deepseek_v41.py  | 52 +++++++++++++++++++
+ 1 file changed, 52 insertions(+)
+
+diff --git a/tpu_inference/models/vllm/experimental/deepseek_v41.py b/tpu_inference/models/vllm/experimental/deepseek_v41.py
+index 3ba275b9..4afb1c3f 100644
+--- a/tpu_inference/models/vllm/experimental/deepseek_v41.py
++++ b/tpu_inference/models/vllm/experimental/deepseek_v41.py
+@@ -1318,6 +1318,58 @@ class DeepseekV41LLMForCausalLM(
+         # and those two need different follow-up.
+         logger.info("DSV41_UNFILLED_SUMMARY checked=%d unfilled=%d", checked,
+                     unfilled)
++        self._report_mhc_mixing_values()
++
++    # The four leaves below gate how much of each sublayer reaches the residual
++    # stream. `hc_*_base` is a gate logit, so the checkpoint's large negative
++    # entries hold gates shut; a tensor of zeros would open every one of them
++    # to the halfway point instead. That failure is quiet: the model still
++    # produces fluent text, driven by the feed-forward prior, while the
++    # attention branch it should be reading arrives at the wrong weight.
++    #
++    # The membership check above cannot see this. It asks whether a name was
++    # claimed, not whether the value that landed is the value the checkpoint
++    # holds, and initial smoke checks passed on exactly that weaker question.
++    _MHC_LEAVES = ("hc_attn_scale", "hc_ffn_scale", "hc_attn_base",
++                   "hc_ffn_base")
++
++    def _report_mhc_mixing_values(self) -> None:
++        """Log the loaded hyper-connection mixing values for a few layers.
++
++        Compare these against
++        the checkpoint reference dump, which holds the same
++        tensors read straight out of the checkpoint. Equal means the loader
++        wrote them. All-zero, or anything else that does not match, means it
++        did not, and the value here is what the forward pass actually used.
++
++        This reads parameters that already exist. It adds no operation to the
++        traced graph, so it does not miss the compile cache.
++        """
++        wanted = {}
++        for name, param in self.named_parameters():
++            leaf = name.rpartition(".")[2]
++            if leaf not in self._MHC_LEAVES:
++                continue
++            # Four layers are enough to separate "the loader never ran" from
++            # "one layer is wrong", and they keep the log short.
++            if any(f".layers.{i}." in name for i in (0, 1, 6, 39)):
++                wanted[name] = param
++        for name in sorted(wanted):
++            param = wanted[name]
++            try:
++                value = jax_view(param.data)
++                flat = jnp.ravel(value)
++                allzero = bool(jnp.all(flat == 0))
++                logger.info(
++                    "DSV41_MHC_VALUE %s shape=%s dtype=%s allzero=%s "
++                    "min=%s max=%s mean=%s first8=%s", name,
++                    tuple(param.shape), param.dtype, allzero,
++                    float(jnp.min(flat)), float(jnp.max(flat)),
++                    float(jnp.mean(flat)),
++                    [float(v) for v in flat[:8]])
++            except Exception as error:  # noqa: BLE001
++                logger.warning("DSV41_MHC_VALUE %s unreadable: %s", name,
++                               error)
+ 
+     def process_weights_after_loading(self) -> None:
+         self.model.finalize_mega_moe_weights()
+-- 
+2.55.0.1082.g2b9226bbc0-goog
+

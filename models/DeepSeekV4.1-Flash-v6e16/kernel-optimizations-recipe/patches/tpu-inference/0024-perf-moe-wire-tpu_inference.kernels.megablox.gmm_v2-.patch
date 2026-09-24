@@ -1,0 +1,26 @@
+From fc0e543aebf498747a884d02367e62a4f51daeff Mon Sep 17 00:00:00 2001
+From: Jawad Amin <jawadamin@google.com>
+Date: Thu, 24 Sep 2026 02:45:56 +0000
+Subject: [PATCH 24/25] perf(moe): wire tpu_inference.kernels.megablox.gmm_v2 into fused_moe_gmm
+ tpu_inference.kernels.megablox.gmm_v2 into fused_moe_gmm
+
+---
+ tpu_inference/layers/common/fused_moe_gmm.py | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/tpu_inference/layers/common/fused_moe_gmm.py b/tpu_inference/layers/common/fused_moe_gmm.py
+index 8e304bd7..17fe942a 100644
+--- a/tpu_inference/layers/common/fused_moe_gmm.py
++++ b/tpu_inference/layers/common/fused_moe_gmm.py
+@@ -19,7 +19,7 @@ import jax
+ from jax import numpy as jnp
+ from jax.sharding import Mesh, NamedSharding
+ from jax.sharding import PartitionSpec as P
+-from tokamax._src.ops.experimental.gmm_v2.gmm_v2 import gmm_v2
++from tpu_inference.kernels.megablox.gmm_v2 import gmm_v2
+ 
+ import tpu_inference.envs as envs
+ from tpu_inference.kernels.collectives.hierrs_sc import wrapper as hier_rs_sc
+-- 
+2.56.0.rc1.310.g51773c2048-goog
+

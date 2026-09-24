@@ -1,0 +1,414 @@
+diff --git a/vllm/models/deepseek_v4_1/common/engram.py b/vllm/models/deepseek_v4_1/common/engram.py
+index f30c3a5..73eccac 100644
+--- a/vllm/models/deepseek_v4_1/common/engram.py
++++ b/vllm/models/deepseek_v4_1/common/engram.py
+@@ -50,6 +50,7 @@ from vllm.logger import init_logger
+ from vllm.model_executor.layers.linear import ReplicatedLinear
+ from vllm.model_executor.layers.quantization import QuantizationConfig
+ from vllm.model_executor.utils import set_weight_attrs
++from vllm.platforms import current_platform
+ from vllm.triton_utils import tl, triton
+ from vllm.utils.platform_utils import is_uva_available
+ from vllm.utils.torch_utils import get_accelerator_view_from_cpu_tensor
+@@ -236,6 +237,121 @@ def _write_hash_cache_kernel(
+     tl.store(cache + slot, value, valid)
+ 
+ 
++def _hash_ids_reference(
++    input_ids: torch.Tensor,
++    token_map: torch.Tensor,
++    dead_mask: torch.Tensor,
++    positions: torch.Tensor,
++    block_table: torch.Tensor | None,
++    query_start_loc: torch.Tensor,
++    multipliers: torch.Tensor,
++    primes: torch.Tensor,
++    offsets: torch.Tensor,
++    cache: torch.Tensor | None,
++    lookback_token_ids: torch.Tensor,
++    lookback_dead_mask: torch.Tensor,
++    output: torch.Tensor,
++    pad_id: int,
++    cache_block_size: int,
++) -> None:
++    """Plain-tensor form of `_hash_ids_kernel`, for platforms with no Triton.
++
++    Writes `output` in place, shaped [tokens, layers, hash columns]. Every step
++    is a gather, a comparison or a reduction, so a tracing backend lowers it
++    without a custom kernel.
++
++    Two details make the arithmetic safe to write with ordinary operators.
++    `compute_hash_multipliers` bounds each multiplier so `token_id * multiplier`
++    stays inside int64 and stays positive, so the rolling hash never goes
++    negative and `%` agrees with the kernel's C-style remainder. And the
++    per-position history is the same for every layer, so only the rolling hash
++    carries a layer axis.
++    """
++    num_tokens = input_ids.shape[0]
++    num_layers, max_ngram = multipliers.shape
++    num_heads = primes.shape[-1]
++    lookback_depth = lookback_token_ids.shape[1]
++    num_query_rows = query_start_loc.numel() - 1
++    device = input_ids.device
++
++    token_map = token_map.to(torch.int64)
++    multipliers = multipliers.to(torch.int64)
++    flat_primes = primes.reshape(num_layers, -1).to(torch.int64)
++    flat_offsets = offsets.reshape(num_layers, -1).to(torch.int64)
++
++    # Which request owns each token. The kernel binary-searches the chunk ends;
++    # counting the ends at or below the token gives the same index, and a count
++    # is one comparison and one sum rather than a data-dependent loop.
++    token = torch.arange(num_tokens, device=device, dtype=torch.int64)
++    ends = query_start_loc[1 : num_query_rows + 1].to(torch.int64)
++    req = torch.clamp((token[:, None] >= ends[None, :]).sum(-1), max=num_query_rows - 1)
++
++    chunk_idx = torch.clamp(query_start_loc.to(torch.int64)[req], max=num_tokens - 1)
++    chunk_start = positions.to(torch.int64)[chunk_idx]
++    position = positions.to(torch.int64)[:num_tokens]
++
++    ids = input_ids.to(torch.int64)
++    dead = dead_mask.to(torch.bool)
++    blocked = torch.zeros(num_tokens, dtype=torch.bool, device=device)
++    rolling = torch.zeros(num_tokens, num_layers, dtype=torch.int64, device=device)
++
++    for shift in range(max_ngram):
++        lookback = position - shift
++
++        # History still inside this chunk: read it straight from `input_ids`.
++        in_batch = lookback >= chunk_start
++        batch_idx = torch.clamp(token - shift, min=0)
++        batch_source = token_map[ids[batch_idx]]
++        batch_source = torch.where(dead[batch_idx], DEAD_ID, batch_source)
++
++        # History just before this chunk: the runner passes it in.
++        column = chunk_start - 1 - lookback
++        in_window = ~in_batch & (column >= 0) & (column < lookback_depth)
++        column = torch.clamp(column, 0, lookback_depth - 1)
++        window_id = torch.where(in_window, lookback_token_ids.to(torch.int64)[req, column], -1)
++        known = in_window & (window_id >= 0)
++        window_source = torch.where(known, token_map[torch.clamp(window_id, min=0)], 0)
++        window_dead = lookback_dead_mask.to(torch.bool)[req, column] & known
++        window_source = torch.where(window_dead, DEAD_ID, window_source)
++
++        if cache is not None:
++            assert block_table is not None
++            max_blocks = block_table.shape[1]
++            span = torch.clamp(lookback, 0, max_blocks * cache_block_size - 1)
++            block_row = torch.clamp(req, max=block_table.shape[0] - 1)
++            needs_cache = ~in_batch & ~known
++            block = torch.where(
++                needs_cache,
++                block_table.to(torch.int64)[block_row, span // cache_block_size],
++                0,
++            )
++            slot = torch.clamp(
++                block * cache_block_size + span % cache_block_size,
++                0,
++                cache.shape[0] - 1,
++            )
++            fallback = torch.where(needs_cache, cache.to(torch.int64)[slot], 0)
++        else:
++            fallback = torch.full_like(batch_source, pad_id)
++
++        source = torch.where(
++            in_batch, batch_source, torch.where(known, window_source, fallback)
++        )
++        # Once the n-gram runs off the start of the sequence or crosses a dead
++        # token, every longer n-gram at this position is padding too.
++        blocked = blocked | (lookback < 0) | (source == DEAD_ID)
++        value = torch.where(blocked, pad_id, source)
++        rolling = rolling ^ (value[:, None] * multipliers[:, shift][None, :])
++
++        if shift > 0:
++            columns = slice((shift - 1) * num_heads, shift * num_heads)
++            hashed = (
++                rolling[:, :, None] % flat_primes[None, :, columns]
++                + flat_offsets[None, :, columns]
++            )
++            output[:, :, columns] = hashed.to(output.dtype)
++
++
+ @triton.jit(
+     do_not_specialize=[
+         "num_tokens",
+@@ -399,7 +515,13 @@ class NgramHashState(nn.Module):
+         self.swa_cache_module = swa_cache_module
+         self.block_size: int = swa_cache_module.block_size
+         self.lookback_depth: int = layout.max_ngram_size - 1
+-        self.use_slot_cache: bool = not vllm_config.use_v2_model_runner
++        # The slot cache is keyed by `slot_mapping`. Only a runner that builds
++        # one can fill it, and the V1 CUDA runner is the one that does. Where
++        # there is no `slot_mapping` the runner passes `lookback_token_ids`
++        # instead, which carries the same history and needs no cache.
++        self.use_slot_cache: bool = (
++            not vllm_config.use_v2_model_runner and current_platform.is_cuda_alike()
++        )
+         self._cache: torch.Tensor | None = None
+         self._kv_cache_ref: weakref.ReferenceType[torch.Tensor] | None = None
+ 
+@@ -504,6 +626,25 @@ class NgramHashState(nn.Module):
+                 256,
+                 DEAD_ID,
+             )
++        if not current_platform.is_cuda_alike():
++            _hash_ids_reference(
++                input_ids,
++                self.token_map,
++                dead_mask,
++                positions,
++                block_table,
++                query_start_loc,
++                self.multipliers,
++                self.primes,
++                self.offsets,
++                cache,
++                lookback_token_ids,
++                lookback_dead_mask,
++                output,
++                self.pad_id,
++                self.block_size,
++            )
++            return output
+         _hash_ids_kernel[(triton.cdiv(num_tokens, 32), num_layers)](
+             input_ids,
+             self.token_map,
+@@ -640,7 +781,12 @@ class ParallelEngramEmbedding(nn.Module):
+         tp_rank = get_tensor_model_parallel_rank()
+         assert head_sizes and all(size > 0 for size in head_sizes)
+         assert sum(head_sizes) <= num_embeddings
+-        if cpu_offload and not is_uva_available():
++        # UVA is how a CUDA device reads the offloaded shard in place. It is
++        # the mechanism, not the feature. A platform without UVA offloads by
++        # gathering the rows on the host and sending only those rows to the
++        # accelerator, so it must not be refused here.
++        self.uva_lookup = cpu_offload and current_platform.is_cuda_alike()
++        if cpu_offload and current_platform.is_cuda_alike() and not is_uva_available():
+             raise RuntimeError("Engram CPU offload requires UVA support")
+         self.num_embeddings = num_embeddings
+         self.dim = dim
+@@ -656,13 +802,26 @@ class ParallelEngramEmbedding(nn.Module):
+         self.cpu_offload = cpu_offload
+         self._views: tuple[torch.Tensor, torch.Tensor] | None = None
+         self._view_src: tuple[int, int] | None = None
+-        self._num_sms = torch.cuda.get_device_properties(
+-            torch.accelerator.current_device_index()
+-        ).multi_processor_count
++        # Rows that a caller gathered from the table on its own, already
++        # dequantized to bf16 and already on the accelerator. A backend whose
++        # accelerator program cannot address the host-resident table sets this
++        # before each forward and clears it after. See `set_gathered_rows`.
++        self.gathered_rows: torch.Tensor | None = None
++        # Only the Triton grid uses this, and only CUDA has SMs to count.
++        self._num_sms = (
++            torch.cuda.get_device_properties(
++                torch.accelerator.current_device_index()
++            ).multi_processor_count
++            if current_platform.is_cuda_alike()
++            else 0
++        )
+ 
+         # Explicit device: model init runs under a `torch.device("cuda")`
+-        # context, which would otherwise put the shard in HBM.
+-        kwargs = {"device": "cpu", "pin_memory": True} if cpu_offload else {}
++        # context, which would otherwise put the shard in HBM. Pinning is a
++        # CUDA facility; asking for it elsewhere fails or is ignored.
++        kwargs: dict[str, object] = {"device": "cpu"} if cpu_offload else {}
++        if self.uva_lookup:
++            kwargs["pin_memory"] = True
+         self.weight = nn.Parameter(
+             torch.empty(
+                 self.part_num_embeddings, dim, dtype=torch.float8_e4m3fn, **kwargs
+@@ -684,6 +843,11 @@ class ParallelEngramEmbedding(nn.Module):
+                 {
+                     "weight_loader": _engram_head_shard_weight_loader,
+                     "engram_vocab_start": self.vocab_start_idx,
++                    # The shard is meant to stay in host memory. A backend that
++                    # sweeps every parameter onto the accelerator must read this
++                    # and leave the shard alone, or it undoes the offload and
++                    # asks for tens of gigabytes of accelerator memory.
++                    "cpu_offloaded": cpu_offload,
+                 },
+             )
+         if cpu_offload:
+@@ -701,7 +865,7 @@ class ParallelEngramEmbedding(nn.Module):
+         Rebuilt if anything swaps `.data`, so a stale device pointer cannot
+         survive silently.
+         """
+-        if not self.cpu_offload:
++        if not self.uva_lookup:
+             return self.weight.data, self.weight_scale_inv.data
+         src = (self.weight.data_ptr(), self.weight_scale_inv.data_ptr())
+         if self._view_src != src:
+@@ -713,6 +877,38 @@ class ParallelEngramEmbedding(nn.Module):
+         assert self._views is not None
+         return self._views
+ 
++    def _lookup_reference(self, indices: torch.Tensor, out: torch.Tensor) -> None:
++        """Gather and dequantize with plain tensor ops, for platforms with no
++        Triton lookup kernel.
++
++        Same result as `_engram_lookup_kernel`: this rank's head columns are
++        gathered, rows outside this rank's vocabulary window write zeros, and
++        head columns past the end of the table write zeros too. When the shard
++        lives on the host the gather runs there, and only the gathered rows,
++        not the table, move to the accelerator.
++        """
++        num_tokens = indices.shape[0]
++        local_heads = self.part_n_hash_cols
++        weight, scales = self.weight.data, self.weight_scale_inv.data
++
++        columns = indices[:, self.head_start : self.head_start + local_heads]
++        missing = local_heads - columns.shape[1]
++        if missing > 0:
++            # This rank owns fewer head columns than it reports. -1 never falls
++            # inside the vocabulary window, so those columns come back zero.
++            columns = torch.nn.functional.pad(columns, (0, missing), value=-1)
++        columns = columns.to(weight.device)
++
++        owned = (columns >= self.vocab_start_idx) & (columns < self.vocab_end_idx)
++        rows = torch.where(owned, columns - self.vocab_start_idx, 0).long()
++
++        values = weight[rows].to(torch.float32)
++        # A ue8m0 byte is a power of two, so it *is* the fp32 exponent field.
++        scale = (scales[rows].to(torch.int32) << 23).view(torch.float32)
++        values = values * scale.repeat_interleave(self.block_size, dim=-1)
++        values = torch.where(owned.unsqueeze(-1), values, 0.0)
++        out.copy_(values.to(torch.bfloat16).to(out.device), non_blocking=True)
++
+     def lookup(
+         self, indices: torch.Tensor, out: torch.Tensor, background: bool = False
+     ) -> None:
+@@ -723,6 +919,9 @@ class ParallelEngramEmbedding(nn.Module):
+         rows = indices.shape[0] * self.part_n_hash_cols
+         if not rows:
+             return
++        if not current_platform.is_cuda_alike():
++            self._lookup_reference(indices, out)
++            return
+         weight, scales = self._storage()
+         # The table dwarfs TLB reach, so a persistent grid near the SM count
+         # beats one program per row; halve it to leave SMs for the main stream.
+@@ -747,6 +946,33 @@ class ParallelEngramEmbedding(nn.Module):
+             GRID=grid,
+         )
+ 
++    def gather_on_host(self, indices: torch.Tensor) -> torch.Tensor:
++        """Gather and dequantize this rank's head columns on the host.
++
++        `indices` is [num_tokens, n_hash_cols] on the host. The result is
++        [num_tokens, part_n_hash_cols, dim] bf16, also on the host, and equals
++        what `lookup` writes.
++
++        A backend calls this when its accelerator program cannot address the
++        host-resident table. It gathers before the program runs, moves the
++        result to the accelerator, and hands it to `set_gathered_rows`.
++        """
++        out = torch.empty(
++            (indices.shape[0], self.part_n_hash_cols, self.dim),
++            dtype=torch.bfloat16,
++        )
++        self._lookup_reference(indices, out)
++        return out
++
++    def set_gathered_rows(self, rows: torch.Tensor | None) -> None:
++        """Supply rows that the caller already gathered, or clear them.
++
++        `rows` is [num_tokens, part_n_hash_cols, dim] bf16 on the accelerator,
++        the same result `lookup` writes. While it is set, `Engram` reads it and
++        never reads the table. Pass None to return to the normal lookup.
++        """
++        self.gathered_rows = rows
++
+     def forward(self, indices: torch.Tensor) -> torch.Tensor:
+         """indices: [num_tokens, n_hash_cols] -> [num_tokens, n_hash_cols, dim]
+         bf16, gathered from all TP shards."""
+@@ -762,6 +988,50 @@ class ParallelEngramEmbedding(nn.Module):
+         return out
+ 
+ 
++def _fused_engram_post_wkv_reference(
++    hidden_states: torch.Tensor,
++    kv: torch.Tensor,
++    q_weight: torch.Tensor,
++    k_weight: torch.Tensor,
++    token_mask: torch.Tensor | None,
++    num_kv_tokens: int,
++    eps: float,
++    clamp_value: float,
++) -> torch.Tensor:
++    """Plain-tensor form of `_fused_engram_post_wkv_kernel`.
++
++    The gate is a normalized dot product of the residual stream against the
++    n-gram key, signed-sqrt'ed before the sigmoid. Rows at or past
++    `num_kv_tokens` read a zero key and a zero value, so they pass the stream
++    through unchanged, which is what the kernel's load masks do.
++    """
++    num_tokens, hc_mult, dim = hidden_states.shape
++    hidden = hidden_states.to(torch.float32)
++
++    if kv.shape[0] < num_tokens:
++        kv = torch.nn.functional.pad(kv, (0, 0, 0, num_tokens - kv.shape[0]))
++    kv = kv[:num_tokens].to(torch.float32)
++    live = (
++        torch.arange(num_tokens, device=hidden.device) < num_kv_tokens
++    ).unsqueeze(-1)
++
++    key = torch.where(live.unsqueeze(-1), kv[:, : hc_mult * dim].view(
++        num_tokens, hc_mult, dim), 0.0)
++    value = torch.where(live, kv[:, hc_mult * dim : (hc_mult + 1) * dim], 0.0)
++
++    hidden_rms = torch.rsqrt(hidden.pow(2).sum(-1) / dim + eps)
++    key_rms = torch.rsqrt(key.pow(2).sum(-1) / dim + eps)
++    dot = (hidden * q_weight.to(torch.float32) * k_weight.to(torch.float32) * key).sum(-1)
++    dot = dot * hidden_rms * key_rms * (dim**-0.5)
++
++    gate = torch.sqrt(torch.clamp(dot.abs(), min=clamp_value))
++    gate = torch.sigmoid(torch.where(dot < 0.0, -gate, gate))
++    if token_mask is not None:
++        gate = torch.where(token_mask.to(torch.bool).unsqueeze(-1), gate, 0.0)
++
++    return (hidden + gate.unsqueeze(-1) * value.unsqueeze(1)).to(hidden_states.dtype)
++
++
+ @triton.jit(do_not_specialize=["num_kv_tokens"])
+ def _fused_engram_post_wkv_kernel(
+     hidden_states,
+@@ -942,11 +1212,17 @@ class Engram(nn.Module):
+ 
+     def prepare_embeddings(self, hash_ids: torch.Tensor) -> None:
+         """Gather this layer's rows on the main stream before decoder layers."""
++        if self.embed_tokens.gathered_rows is not None:
++            # The caller already gathered the rows and put them on the
++            # accelerator, so there is nothing to look up here.
++            return
+         self.embed_tokens.lookup(hash_ids, self.staged_rows[: hash_ids.shape[0]])
+ 
+     def embed(self, hash_ids: torch.Tensor) -> torch.Tensor:
+         """Gather heads, returning only local tokens when SP is enabled."""
+-        rows = self.staged_rows[: hash_ids.shape[0]]
++        rows = self.embed_tokens.gathered_rows
++        rows = self.staged_rows if rows is None else rows
++        rows = rows[: hash_ids.shape[0]]
+         if self.embed_tokens.tp_size == 1:
+             return rows
+         if self.use_sequence_parallel:
+@@ -998,6 +1274,18 @@ class Engram(nn.Module):
+         if num_tokens == 0:
+             return output
+ 
++        if not current_platform.is_cuda_alike():
++            return _fused_engram_post_wkv_reference(
++                hidden_states,
++                kv,
++                self.q_weight,
++                self.k_weight,
++                token_mask,
++                num_kv_tokens,
++                self.eps,
++                self.clamp_value,
++            )
++
+         block_size = triton.next_power_of_2(dim)
+         num_warps = 8 if block_size >= 2048 else 4
+         mask = token_mask if token_mask is not None else hidden_states

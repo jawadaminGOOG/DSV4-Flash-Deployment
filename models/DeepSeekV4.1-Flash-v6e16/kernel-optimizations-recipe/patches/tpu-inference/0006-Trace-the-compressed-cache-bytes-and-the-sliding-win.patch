@@ -1,0 +1,106 @@
+From 020da75aac48102c2ab179df9b109f9fa5461e43 Mon Sep 17 00:00:00 2001
+From: Jawad Amin <jawadamin@google.com>
+Date: Sat, 12 Sep 2026 10:13:07 +0000
+Subject: [PATCH 6/8] Trace the compressed cache bytes and the sliding-window
+ handoff
+
+The first compressed-attention layer produces a finite but enormous value
+from inputs that are all small and finite. The existing trace covers the
+tensors the layer computes, but not the two other things the sparse kernel
+reads: the bytes already in the compressed cache, and the accumulator, the
+running sum and the running maximum that the sliding-window kernel hands
+over.
+
+Add both under the same DSV41_TRACE_LAYER_STATS switch. The cache trace
+reports the range of the scale bytes, because the kernel decodes a scale
+byte as 2 ** (byte - 127), so one high byte is enough to explain a huge
+output.
+
+Also report the unfilled-parameter count even when it is zero. A silent log
+otherwise means either that every parameter was filled or that the check
+never ran, and those two need different follow-up.
+---
+ .../deepseek_v41/deepseek_v41_attention.py    | 25 +++++++++++++++++--
+ .../models/vllm/experimental/deepseek_v41.py  |  9 +++++++
+ 2 files changed, 32 insertions(+), 2 deletions(-)
+
+diff --git a/tpu_inference/layers/vllm/custom_ops/experimental/deepseek_v41/deepseek_v41_attention.py b/tpu_inference/layers/vllm/custom_ops/experimental/deepseek_v41/deepseek_v41_attention.py
+index fc4b5270..e5c59c51 100644
+--- a/tpu_inference/layers/vllm/custom_ops/experimental/deepseek_v41/deepseek_v41_attention.py
++++ b/tpu_inference/layers/vllm/custom_ops/experimental/deepseek_v41/deepseek_v41_attention.py
+@@ -67,8 +67,8 @@ from tpu_inference.kernels.experimental.deepseek_v4.core_attention.sparse_mla im
+ from tpu_inference.kernels.experimental.deepseek_v4.o_projection import \
+     fused_reverse_rope_wo_a_projection
+ from tpu_inference.layers.common.sharding import ShardingAxisName
+-from tpu_inference.layers.vllm.custom_ops.experimental.deepseek_v41.deepseek_v41_compressor import \
+-    VllmDeepseekV41Compressor
++from tpu_inference.layers.vllm.custom_ops.experimental.deepseek_v41.deepseek_v41_compressor import (  # noqa: E501
++    NOPE_CHANNELS, QUANT_BLOCK, VllmDeepseekV41Compressor)
+ from tpu_inference.layers.vllm.custom_ops.experimental.deepseek_v41.deepseek_v41_indexer import (
+     VllmDeepseekV41Indexer, VllmDeepseekV41IndexerCache)
+ from tpu_inference.logger import init_logger
+@@ -541,6 +541,18 @@ class VllmDeepseekV41MLAAttention(DeepseekV4Attention):
+             # array this layer reads, the sparse kernel must see the copy the
+             # sliding-window kernel just wrote.
+             two_caches_same_buffer = (nope_index == swa_cache_index)
++            # The scale bytes of every record the compressed array holds. A
++            # record the compressor wrote carries a scale byte near 120, and
++            # an untouched record carries 0. Any other value means something
++            # else wrote into this array, and the sparse kernel decodes that
++            # byte as `2 ** (byte - 127)`.
++            _trace_attn(
++                f"L{self.layer_id:02d}cache",
++                nope_scale_bytes=main_cache_nope.reshape(
++                    main_cache_nope.shape[0], main_cache_nope.shape[1],
++                    -1)[:, :, NOPE_CHANNELS:NOPE_CHANNELS +
++                        NOPE_CHANNELS // QUANT_BLOCK],
++            )
+ 
+         # All array inputs and outputs are sharded along the leading axis on
+         # ShardingAxisName.ATTN_DATA (caches on ShardingAxisName.BATCH);
+@@ -595,6 +607,15 @@ class VllmDeepseekV41MLAAttention(DeepseekV4Attention):
+             if swa_only:
+                 return swa_output, updated_sw_cache
+ 
++            # The sliding-window kernel hands its accumulator, its running sum
++            # and its running maximum to the sparse kernel, which merges the
++            # two softmaxes. The merge divides by the sum, so a sum near zero
++            # beside a non-zero accumulator makes the output enormous.
++            _trace_attn(f"L{self.layer_id:02d}swa",
++                        swa_out=swa_output,
++                        swa_l=swa_l,
++                        swa_m=swa_m)
++
+             if two_caches_same_buffer:
+                 main_cache_nope = updated_sw_cache
+ 
+diff --git a/tpu_inference/models/vllm/experimental/deepseek_v41.py b/tpu_inference/models/vllm/experimental/deepseek_v41.py
+index 32cd3abc..24a8968e 100644
+--- a/tpu_inference/models/vllm/experimental/deepseek_v41.py
++++ b/tpu_inference/models/vllm/experimental/deepseek_v41.py
+@@ -1260,9 +1260,13 @@ class DeepseekV41LLMForCausalLM(
+         pattern rather than as a zero, so the model produces a plausible
+         shape of output and a meaningless value.
+         """
++        checked = 0
++        unfilled = 0
+         for name, param in self.named_parameters():
++            checked += 1
+             if name in loaded_params:
+                 continue
++            unfilled += 1
+             detail = ""
+             try:
+                 value = jax_view(param.data)
+@@ -1278,6 +1282,11 @@ class DeepseekV41LLMForCausalLM(
+                 "DSV41_UNFILLED parameter %s received no checkpoint tensor: "
+                 "shape=%s dtype=%s%s", name, tuple(param.shape), param.dtype,
+                 detail)
++        # Report the count even when it is zero. Without this line a silent log
++        # means either "every parameter was filled" or "the check never ran",
++        # and those two need different follow-up.
++        logger.info("DSV41_UNFILLED_SUMMARY checked=%d unfilled=%d", checked,
++                    unfilled)
+ 
+     def process_weights_after_loading(self) -> None:
+         self.model.finalize_mega_moe_weights()

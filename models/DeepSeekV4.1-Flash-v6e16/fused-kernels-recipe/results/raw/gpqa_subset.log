@@ -1,0 +1,56 @@
+
+=== C1: 8 known-answer questions, cap 1024 ===
+  ok    stop     ntok=21     What is the capital of France? Answer in one w
+  ok    stop     ntok=21     What is 17 * 23? Reply with the number only.
+  ok    stop     ntok=22     Which planet is closest to the Sun? Answer in 
+  ok    stop     ntok=96     How many sides does a hexagon have? Reply with
+  ok    stop     ntok=19     What is the chemical symbol for gold? Reply wi
+  ok    stop     ntok=79     Spell the word 'because' backwards. Reply with
+  ok    stop     ntok=22     What is 144 divided by 12? Reply with the numb
+  ok    stop     ntok=66     Name the largest ocean on Earth. Answer in two
+  -> 8/8 correct, 8/8 terminated
+
+=== C2 to C4: 32 GPQA Diamond questions, cap 14336, C=32, T=1.0 ===
+  [  1/32] stop     ntok=504    picked=A want=A loop=0
+  [  2/32] stop     ntok=559    picked=C want=C loop=0
+  [  3/32] stop     ntok=578    picked=D want=D loop=0
+  [  4/32] stop     ntok=619    picked=A want=A loop=0
+  [  5/32] stop     ntok=732    picked=D want=D loop=0
+  [  6/32] stop     ntok=805    picked=D want=D loop=0
+  [  7/32] stop     ntok=812    picked=D want=D loop=0
+  [  8/32] stop     ntok=818    picked=C want=C loop=0
+  [  9/32] stop     ntok=973    picked=B want=A loop=0
+  [ 10/32] stop     ntok=1120   picked=A want=A loop=0
+  [ 11/32] stop     ntok=1392   picked=A want=A loop=0
+  [ 12/32] stop     ntok=1634   picked=B want=B loop=0
+  [ 13/32] stop     ntok=1649   picked=D want=D loop=0
+  [ 14/32] stop     ntok=1871   picked=A want=D loop=0
+  [ 15/32] stop     ntok=1987   picked=C want=C loop=0
+  [ 16/32] stop     ntok=2553   picked=A want=A loop=0
+  [ 17/32] stop     ntok=3321   picked=B want=B loop=0
+  [ 18/32] stop     ntok=3400   picked=B want=B loop=0
+  [ 19/32] stop     ntok=3476   picked=D want=D loop=0
+  [ 20/32] stop     ntok=4298   picked=D want=D loop=0
+  [ 21/32] stop     ntok=4523   picked=A want=C loop=0
+  [ 22/32] stop     ntok=4799   picked=D want=D loop=0
+  [ 23/32] stop     ntok=6277   picked=A want=A loop=0
+  [ 24/32] stop     ntok=12545  picked=A want=A loop=0
+  [ 25/32] length   ntok=14336  picked=None want=D loop=0
+  [ 26/32] length   ntok=14336  picked=None want=A loop=0
+  [ 27/32] length   ntok=14336  picked=None want=A loop=0
+  [ 28/32] length   ntok=14336  picked=None want=D loop=0
+  [ 29/32] length   ntok=14336  picked=None want=C loop=0
+  [ 30/32] length   ntok=14336  picked=None want=B loop=0
+  [ 31/32] length   ntok=14336  picked=None want=D loop=0
+  [ 32/32] length   ntok=14336  picked=None want=B loop=0
+  -> terminated 24/32 (75%), degenerate 0/32 (0%), pass@1 65.6%
+  -> output tokens min/median/max = 504/3321/14336, wall 527.4s
+
+=== VERDICT ===
+  PASS  C1 known answers correct         8/8 (need >= 7)
+  PASS  C1 known answers terminated      8/8 (need all)
+  FAIL  C2 termination rate              75% (need >= 80%)
+  PASS  C3 degenerate tails              0% (need <= 10%)
+  PASS  C4 pass@1 above guessing         65.6% (need > 25%)
+
+  RED: this deployment does not answer correctly.

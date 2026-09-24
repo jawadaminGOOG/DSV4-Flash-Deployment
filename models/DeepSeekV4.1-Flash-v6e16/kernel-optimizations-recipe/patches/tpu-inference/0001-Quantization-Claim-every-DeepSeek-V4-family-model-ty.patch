@@ -1,0 +1,167 @@
+From e10fb08d37e6549106229705940dd21849f4420c Mon Sep 17 00:00:00 2001
+From: Jawad Amin <jawadamin@google.com>
+Date: Thu, 10 Sep 2026 18:28:58 +0000
+Subject: [PATCH 1/8] [Quantization] Claim every DeepSeek V4 family model type
+ for deepseek_v4_fp8
+
+register_quantization_config lets this config override the quantization
+method a checkpoint declares, and on TPU this class wins the
+"deepseek_v4_fp8" name. It inherited a test that accepts only the model
+type "deepseek_v4". The model types "deepseek_v4_text", "deepseek_v41"
+and "deepseek_v41_text" therefore fell through to plain FP8.
+
+A checkpoint that falls through gets VllmFp8MoEMethod for its experts.
+That method cannot read packed E2M1 pairs, so the int8 expert lever
+never runs. TPU v6e has no FP4 MXU, and the lever is the only path that
+serves these checkpoints. Nothing raises, and nothing warns above debug
+level, so the failure appears later as wrong output or a shape error.
+
+Override override_quantization_method in this class. Ask the base class
+first, so the AMD-Quark MXFP4 branch keeps its answer, then widen to the
+three model types the base class misses.
+
+Add tests/layers/vllm/test_deepseek_v4_fp8_config.py with 10 cases. Nine
+hold the resolution for each model type and each rejection case. One
+asserts that this class owns the registered name.
+
+Signed-off-by: Jawad Amin <jawadamin@google.com>
+---
+ .../vllm/test_deepseek_v4_fp8_config.py       | 88 +++++++++++++++++++
+ .../vllm/quantization/deepseek_v4_fp8.py      | 25 ++++++
+ 2 files changed, 113 insertions(+)
+ create mode 100644 tests/layers/vllm/test_deepseek_v4_fp8_config.py
+
+diff --git a/tests/layers/vllm/test_deepseek_v4_fp8_config.py b/tests/layers/vllm/test_deepseek_v4_fp8_config.py
+new file mode 100644
+index 00000000..6d527220
+--- /dev/null
++++ b/tests/layers/vllm/test_deepseek_v4_fp8_config.py
+@@ -0,0 +1,88 @@
++# Copyright 2026 Google LLC
++#
++# Licensed under the Apache License, Version 2.0 (the "License");
++# you may not use this file except in compliance with the License.
++# You may obtain a copy of the License at
++#
++#     http://www.apache.org/licenses/LICENSE-2.0
++#
++# Unless required by applicable law or agreed to in writing, software
++# distributed under the License is distributed on an "AS IS" BASIS,
++# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++# See the License for the specific language governing permissions and
++# limitations under the License.
++"""Model-type resolution for the "deepseek_v4_fp8" quantization config.
++
++A DeepSeek V4 family checkpoint reaches VllmMxfp4MoEMethod only when this config
++claims it. A model type that no registered config claims falls back to plain FP8,
++its packed E2M1 expert pairs are then read as FP8, and the int8 expert lever never
++runs. Nothing raises when that happens, so these tests hold the resolution.
++"""
++
++import types
++
++import pytest
++from vllm.model_executor.layers.quantization import get_quantization_config
++
++from tpu_inference.layers.common.quant_methods import DSV4_FP8
++from tpu_inference.layers.vllm.quantization.deepseek_v4_fp8 import \
++    VllmDeepseekV4Fp8Config
++
++# Every DeepSeek V4 family checkpoint writes "fp8" as its quant_method and carries
++# the real expert dtype in "expert_dtype". Taken from the published config.json.
++_HF_QUANT_CFG = {
++    "quant_method": "fp8",
++    "activation_scheme": "dynamic",
++    "weight_block_size": [32, 32],
++    "scale_fmt": "ue8m0",
++    "expert_dtype": "fp4",
++}
++
++_UNSET = object()
++
++
++def _resolve(model_type, hf_quant_cfg=_UNSET, user_quant=None):
++    hf_config = types.SimpleNamespace(model_type=model_type)
++    if hf_quant_cfg is _UNSET:
++        hf_quant_cfg = _HF_QUANT_CFG
++    return VllmDeepseekV4Fp8Config.override_quantization_method(
++        hf_quant_cfg, user_quant, hf_config)
++
++
++@pytest.mark.parametrize("model_type", [
++    "deepseek_v4",
++    "deepseek_v4_text",
++    "deepseek_v41",
++    "deepseek_v41_text",
++])
++def test_every_deepseek_v4_family_type_claims_the_deepseek_fp8_path(
++        model_type):
++    assert _resolve(model_type) == DSV4_FP8
++
++
++def test_this_config_owns_the_registered_name():
++    # register_quantization_config overwrites an existing name and logs only at
++    # debug level, so the winner is worth asserting.
++    assert get_quantization_config(DSV4_FP8) is VllmDeepseekV4Fp8Config
++
++
++def test_an_explicit_user_choice_still_wins():
++    assert _resolve("llama", user_quant=DSV4_FP8) == DSV4_FP8
++
++
++def test_a_foreign_model_type_is_left_alone():
++    assert _resolve("llama") is None
++
++
++def test_a_non_fp8_checkpoint_is_left_alone():
++    cfg = dict(_HF_QUANT_CFG, quant_method="awq")
++    assert _resolve("deepseek_v41", hf_quant_cfg=cfg) is None
++
++
++def test_a_quant_config_that_is_not_a_dict_is_left_alone():
++    assert _resolve("deepseek_v41", hf_quant_cfg="fp8") is None
++
++
++def test_a_missing_hf_config_is_left_alone():
++    assert VllmDeepseekV4Fp8Config.override_quantization_method(
++        _HF_QUANT_CFG, None, None) is None
+diff --git a/tpu_inference/layers/vllm/quantization/deepseek_v4_fp8.py b/tpu_inference/layers/vllm/quantization/deepseek_v4_fp8.py
+index f4b24271..59400ef5 100644
+--- a/tpu_inference/layers/vllm/quantization/deepseek_v4_fp8.py
++++ b/tpu_inference/layers/vllm/quantization/deepseek_v4_fp8.py
+@@ -46,10 +46,35 @@ class VllmDeepseekV4Fp8Config(DeepseekV4FP8Config, VllmQuantConfig):
+     Linear layers always use VllmFp8LinearMethod (FP8 block-quant).
+     """
+ 
++    # Model types this config claims beyond the ones the base class already
++    # claims. Every DeepSeek V4 family checkpoint writes "fp8" as its
++    # quant_method and carries the real expert dtype in "expert_dtype", so a
++    # model type that no registered config claims here falls back to plain FP8
++    # and its packed MXFP4 experts are then read as FP8.
++    _EXTRA_MODEL_TYPES = ("deepseek_v4_text", "deepseek_v41",
++                          "deepseek_v41_text")
++
+     @classmethod
+     def get_name(cls) -> str:
+         return DSV4_FP8
+ 
++    @classmethod
++    def override_quantization_method(cls, hf_quant_cfg, user_quant,
++                                     hf_config=None) -> Optional[str]:
++        # The base class handles the model types it knows, including the
++        # AMD-Quark MXFP4 exports, so ask it first and only widen the answer.
++        claimed = super().override_quantization_method(
++            hf_quant_cfg, user_quant, hf_config)
++        if claimed is not None:
++            return claimed
++        if not isinstance(hf_quant_cfg, dict):
++            return None
++        if hf_quant_cfg.get("quant_method") not in ("fp8", DSV4_FP8):
++            return None
++        if getattr(hf_config, "model_type", None) in cls._EXTRA_MODEL_TYPES:
++            return DSV4_FP8
++        return None
++
+     def get_quant_method(
+         self,
+         layer: torch.nn.Module,

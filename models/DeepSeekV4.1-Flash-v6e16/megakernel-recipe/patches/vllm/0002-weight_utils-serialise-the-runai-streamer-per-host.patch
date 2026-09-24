@@ -1,0 +1,205 @@
+diff --git a/vllm/model_executor/model_loader/weight_utils.py b/vllm/model_executor/model_loader/weight_utils.py
+index 3085df8..104be35 100644
+--- a/vllm/model_executor/model_loader/weight_utils.py
++++ b/vllm/model_executor/model_loader/weight_utils.py
+@@ -4,6 +4,7 @@
+ 
+ import asyncio
+ import concurrent.futures
++import fcntl
+ import fnmatch
+ import glob
+ import hashlib
+@@ -50,9 +51,15 @@ from vllm.utils.import_utils import PlaceholderModule
+ 
+ try:
+     from runai_model_streamer import SafetensorsStreamer
++    from runai_model_streamer.safetensors_streamer import (
++        safetensors_pytorch as runai_safetensors_pytorch,
++    )
+ except ImportError:
+     runai_model_streamer = PlaceholderModule("runai_model_streamer")  # type: ignore[assignment]
+     SafetensorsStreamer = runai_model_streamer.placeholder_attr("SafetensorsStreamer")
++    runai_safetensors_pytorch = runai_model_streamer.placeholder_attr(
++        "safetensors_streamer.safetensors_pytorch"
++    )
+ 
+ try:
+     from fastsafetensors import SingleGroup
+@@ -1030,41 +1037,152 @@ def multi_thread_safetensors_weights_iterator(
+                 yield key, state_dict.pop(key)
+ 
+ 
+-def runai_safetensors_weights_iterator(
++RUNAI_HOST_LOCK_PATH = "/dev/shm/vllm_runai_streamer_host.lock"
++
++
++@contextmanager
++def _runai_host_lock(hold: bool) -> Generator[None, None, None]:
++    """Hold an exclusive lock that every rank on this host shares.
++
++    `flock` is a kernel object, so the lock covers one node and nothing wider.
++    That is the scope that matters, because host memory is what runs out.
++    """
++    if not hold:
++        yield
++        return
++    with open(RUNAI_HOST_LOCK_PATH, "a") as lock_file:
++        fcntl.flock(lock_file, fcntl.LOCK_EX)
++        try:
++            yield
++        finally:
++            fcntl.flock(lock_file, fcntl.LOCK_UN)
++
++
++def _runai_file_tensor_stats(
+     hf_weights_files: list[str],
+-    use_tqdm_on_load: bool,
+-    is_distributed: bool = False,
+-) -> Generator[tuple[str, torch.Tensor], None, None]:
+-    """Iterate over the weights in the model safetensor files."""
++) -> list[tuple[int, int, int]]:
++    """Read the safetensors header of each file and report three numbers.
++
++    Returns the tensor count, the largest tensor in bytes and the sum of every
++    tensor in bytes, for each file in the order given. The header is a few
++    kilobytes, so this reads almost nothing.
++    """
+     with SafetensorsStreamer() as streamer:
+-        is_cuda_alike = current_platform.is_cuda_alike()
+-        device = (
+-            f"cuda:{current_platform.current_device()}"
+-            if is_distributed and is_cuda_alike
+-            else "cpu"
++        metadatas = runai_safetensors_pytorch.prepare_request(
++            streamer.file_streamer, hf_weights_files, None
+         )
++    return [
++        (len(tensor_sizes), max(tensor_sizes, default=0), sum(tensor_sizes))
++        for (_, _, tensor_sizes) in metadatas
++    ]
+ 
++
++def _runai_stream_files(
++    hf_weights_files: list[str],
++    device: str,
++    is_distributed: bool,
++    bar: tqdm,
++    clone: bool = True,
++) -> Generator[tuple[str, torch.Tensor], None, None]:
++    """Stream one group of files through one streamer, then free its buffer.
++
++    Each yielded tensor is a view into the streamer buffer, so the default
++    clones it before the caller sees it.
++
++    Pass `clone=False` only for a call that streams one file. The buffer of a
++    single-file call holds every tensor of that file at once, so no later chunk
++    overwrites an earlier one, and the views stay valid for the whole call. This
++    matters for a file with one very large tensor, where the clone would double
++    the host memory that the file needs.
++    """
++    with SafetensorsStreamer() as streamer:
+         streamer.stream_files(
+             hf_weights_files,
+             device=device,
+             is_distributed=is_distributed,
+         )
+-        total_tensors = sum(
+-            len(tensors_meta)
+-            for tensors_meta in streamer.files_to_tensors_metadata.values()
+-        )
++        for name, tensor in streamer.get_tensors():
++            bar.update(1)
++            yield name, tensor.clone() if clone else tensor
+ 
+-        tensor_iter = tqdm(
+-            streamer.get_tensors(),
+-            total=total_tensors,
+-            desc="Loading safetensors using Runai Model Streamer",
+-            bar_format=_BAR_FORMAT,
+-            disable=not enable_tqdm(use_tqdm_on_load),
+-            mininterval=2,
+-        )
+ 
+-        for name, tensor in tensor_iter:
+-            yield name, tensor.clone()
++def runai_safetensors_weights_iterator(
++    hf_weights_files: list[str],
++    use_tqdm_on_load: bool,
++    is_distributed: bool = False,
++) -> Generator[tuple[str, torch.Tensor], None, None]:
++    """Iterate over the weights in the model safetensor files."""
++    is_cuda_alike = current_platform.is_cuda_alike()
++    device = (
++        f"cuda:{current_platform.current_device()}"
++        if is_distributed and is_cuda_alike
++        else "cpu"
++    )
++
++    # The streamer allocates one host buffer for each `stream_files` call and
++    # sizes it to hold the largest tensor of that call. It cannot split a
++    # tensor. A model that holds a single tensor of tens of gigabytes therefore
++    # makes every rank on the node allocate a buffer that large at the same
++    # time, and the node runs out of host memory.
++    #
++    # Set `RUNAI_STREAMER_HOST_LOCK_BYTES` to the tensor size above which one
++    # file streams under a host-wide lock. The files then stream one at a time,
++    # which frees the buffer between files, and only one rank on the node holds
++    # a large buffer. Zero, the default, streams every file in one call.
++    lock_bytes = int(os.getenv("RUNAI_STREAMER_HOST_LOCK_BYTES", "0"))
++    if lock_bytes <= 0 or is_distributed:
++        with SafetensorsStreamer() as streamer:
++            streamer.stream_files(
++                hf_weights_files,
++                device=device,
++                is_distributed=is_distributed,
++            )
++            total_tensors = sum(
++                len(tensors_meta)
++                for tensors_meta in streamer.files_to_tensors_metadata.values()
++            )
++
++            tensor_iter = tqdm(
++                streamer.get_tensors(),
++                total=total_tensors,
++                desc="Loading safetensors using Runai Model Streamer",
++                bar_format=_BAR_FORMAT,
++                disable=not enable_tqdm(use_tqdm_on_load),
++                mininterval=2,
++            )
++
++            for name, tensor in tensor_iter:
++                yield name, tensor.clone()
++        return
++
++    stats = _runai_file_tensor_stats(hf_weights_files)
++    memory_limit = int(os.getenv("RUNAI_STREAMER_MEMORY_LIMIT", "0"))
++    logger.info(
++        "Runai Model Streamer: %d of %d files hold a tensor of %d bytes or "
++        "more. Each of those streams under a host-wide lock.",
++        sum(1 for (_, largest, _) in stats if largest >= lock_bytes),
++        len(hf_weights_files),
++        lock_bytes,
++    )
++    bar = tqdm(
++        total=sum(count for (count, _, _) in stats),
++        desc="Loading safetensors using Runai Model Streamer",
++        bar_format=_BAR_FORMAT,
++        disable=not enable_tqdm(use_tqdm_on_load),
++        mininterval=2,
++    )
++    with bar:
++        for path, (_, largest, total) in zip(hf_weights_files, stats):
++            is_large = largest >= lock_bytes
++            # Skip the clone only when the buffer holds the whole file, so no
++            # later chunk can overwrite a tensor that the caller still reads.
++            # The clone is what makes a large file cost twice its size in host
++            # memory, so this is where that cost goes away.
++            clone = not (is_large and 0 < total <= memory_limit)
++            with _runai_host_lock(is_large):
++                yield from _runai_stream_files(
++                    [path], device, is_distributed, bar, clone=clone
++                )
+ 
+ 
+ def fastsafetensors_weights_iterator(

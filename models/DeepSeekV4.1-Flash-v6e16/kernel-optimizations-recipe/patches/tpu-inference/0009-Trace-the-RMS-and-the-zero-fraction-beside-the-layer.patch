@@ -1,0 +1,121 @@
+From d3e9c9e60968f153a67d0a53f2155acd3cd35b24 Mon Sep 17 00:00:00 2001
+From: Jawad Amin <jawadamin@google.com>
+Date: Wed, 16 Sep 2026 19:42:39 +0000
+Subject: [PATCH 09/18] Trace the RMS and the zero fraction beside the layer
+ maximum
+
+The layer trace reported a `nan` flag, an `inf` flag and the largest absolute
+value. Those three find a blow-up. They do not find a loss of precision: one
+large entry holds the maximum steady while every other entry degrades, so a
+damaged layer and a healthy layer print the same line.
+
+Add two statistics that move with the bulk of the distribution instead of its
+extreme. `rms` is the root mean square, accumulated in float32 because a
+bfloat16 sum loses many small squares. `zerofrac` is the fraction of entries
+that are exactly zero, which rises when a low-precision product flushes its
+small terms away.
+
+Also trace the attention output on its own, before it merges into the residual
+stream. The model-level trace already reports the layer output, which is the
+expert output. The two points together separate an attention fault from an
+expert fault.
+
+State in the comment that the traced graph misses the compile cache, because
+a traced run otherwise looks like it hung during startup.
+---
+ .../models/vllm/experimental/deepseek_v41.py  | 43 ++++++++++++++++---
+ 1 file changed, 37 insertions(+), 6 deletions(-)
+
+diff --git a/tpu_inference/models/vllm/experimental/deepseek_v41.py b/tpu_inference/models/vllm/experimental/deepseek_v41.py
+index 24a8968e..3ba275b9 100644
+--- a/tpu_inference/models/vllm/experimental/deepseek_v41.py
++++ b/tpu_inference/models/vllm/experimental/deepseek_v41.py
+@@ -86,20 +86,36 @@ if typing.TYPE_CHECKING:
+ logger = init_logger(__name__)
+ 
+ # Set `DSV41_TRACE_LAYER_STATS=1` to print the numeric range of each decoder
+-# layer's outputs. The trace tells you which layer first loses range, which is
+-# the only practical way to find the source of a `nan` in a 40-layer forward
+-# pass. The trace adds a host callback for each printed tensor, so it changes
+-# the compiled graph and slows the run. Keep it off in production.
++# layer's outputs. The trace tells you which layer first loses range or
++# precision, which is the only practical way to find where a 40-layer forward
++# pass goes wrong. The trace adds a host callback for each printed tensor, so
++# it changes the compiled graph and slows the run. Keep it off in production.
++#
++# CAUTION: the changed graph misses the persistent compile cache. A traced run
++# pays a full compile before it serves its first token.
+ _TRACE_LAYER_STATS = os.environ.get("DSV41_TRACE_LAYER_STATS") == "1"
+ 
+ 
+ def _trace_stats(tag: str, **tensors: torch.Tensor | None) -> None:
+-    """Print a `nan` flag, an `inf` flag and a magnitude for each tensor.
++    """Print a `nan` flag, an `inf` flag and three magnitudes for each tensor.
+ 
+     The print has to run inside the compiled graph, so it uses
+     `jax.debug.print` on the JAX value behind each torch tensor. `absmax`
+     ignores the non-finite entries, so a tensor that holds both a `nan` and a
+     real value still reports the real magnitude.
++
++    `absmax` finds a blow-up. It does not find a loss of precision, because a
++    single large entry holds it steady while every other entry degrades. Two
++    more statistics cover that case:
++
++    * `rms` follows the bulk of the distribution instead of its extreme.
++    * `zerofrac` is the fraction of entries that are exactly zero. A product
++      computed in a low-precision format flushes its small terms to zero, so
++      this fraction rises when such a path loses the small components.
++
++    Read the three across the decode steps of one run. A healthy layer holds
++    them steady as the sequence grows. The layer whose statistics drift is the
++    layer to read next.
+     """
+     if not _TRACE_LAYER_STATS:
+         return
+@@ -114,13 +130,19 @@ def _trace_stats(tag: str, **tensors: torch.Tensor | None) -> None:
+                         name, value.dtype, value.shape)
+             continue
+         finite = jnp.where(jnp.isfinite(value), jnp.abs(value), 0.0)
++        # Accumulate the mean square in float32. The traced tensors are
++        # bfloat16, whose 8-bit mantissa loses a sum of many small squares.
++        wide = finite.astype(jnp.float32)
+         jax.debug.print(
+-            "DSV41_TRACE {tag} {name} nan={nan} inf={inf} absmax={absmax}",
++            "DSV41_TRACE {tag} {name} nan={nan} inf={inf} absmax={absmax} "
++            "rms={rms} zerofrac={zerofrac}",
+             tag=tag,
+             name=name,
+             nan=jnp.isnan(value).any(),
+             inf=jnp.isinf(value).any(),
+             absmax=jnp.max(finite),
++            rms=jnp.sqrt(jnp.mean(wide * wide)),
++            zerofrac=jnp.mean((value == 0).astype(jnp.float32)),
+         )
+ 
+ 
+@@ -224,6 +246,9 @@ class DeepseekV4DecoderLayer(nn.Module):
+         config = vllm_config.model_config.hf_config
+         self.hidden_size = config.hidden_size
+         self.use_sequence_parallel = _use_sequence_parallel(vllm_config)
++        # The trace tags its lines with this index, so a reader can align a
++        # line with the layer that produced it.
++        self.layer_id = extract_layer_index(prefix)
+ 
+         self.engram: Engram | None = None
+         if engram_layout is not None:
+@@ -397,6 +422,12 @@ class DeepseekV4DecoderLayer(nn.Module):
+         if self.use_sequence_parallel:
+             x = sp_reduce_scatter(x)
+ 
++        # Trace the attention output on its own, before it merges into the
++        # residual stream. The model-level trace reports the layer output,
++        # which is the expert output, so the two points together say whether
++        # attention or the experts produced a change.
++        _trace_stats(f"L{self.layer_id:02d}attn", attn_out=x)
++
+         residual = mhc_post_torch(x, residual, post_mix, res_mix)
+         post_mix, res_mix, x, ffn_pre = mhc_pre_delayed_torch(
+             residual,
+-- 
+2.55.0.1082.g2b9226bbc0-goog
+

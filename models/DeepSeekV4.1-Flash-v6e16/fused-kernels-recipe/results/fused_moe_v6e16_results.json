@@ -1,0 +1,93 @@
+{
+  "model": "deepseek-ai/DeepSeek-V4.1-Flash",
+  "hardware": "TPU v6e-16 (4x4 optical torus, 4x ct6e-standard-4t)",
+  "recipe": "Single-Kernel Fused W13+SiLU+W2 Pallas Megakernel + Hybrid EP=8 x TP=2 Routed Expert Sharding",
+  "tpu_inference_commit": "623b2904",
+  "env": {
+    "TPU_HYBRID_EP8_TP2_MOE": "1",
+    "TPU_MEGABLOX_FUSED_W13_W2": "1",
+    "TPU_MEGABLOX_DECODE_VMEM_MEGABLOCKS": "4",
+    "TPU_MEGABLOX_DECODE_TILE_N": "512"
+  },
+  "xprof_c64_decode_step_breakdown_ms": {
+    "xprof_baseline_ep16_two_pass": {
+      "total_tensorcore_xla_ms": 39.861,
+      "jit_step_fun_impl_p50_ms": 39.18,
+      "gmm_v2_moe_ms": 10.748,
+      "ici_collectives_all_reduce_all_gather_ms": 11.066,
+      "rpa_v3_attention_ms": 5.512,
+      "dense_gemm_and_mhc_ms": 12.535,
+      "vmem_footprint_mib": 8.55,
+      "cross_rank_straggler_skew_ratio": 1.58
+    },
+    "local_vmem_prefetch_only_ep16": {
+      "total_tensorcore_xla_ms": 39.593,
+      "jit_step_fun_impl_p50_ms": 38.79,
+      "gmm_v2_moe_ms": 10.358,
+      "ici_collectives_all_reduce_all_gather_ms": 11.066,
+      "rpa_v3_attention_ms": 5.512,
+      "dense_gemm_and_mhc_ms": 12.657,
+      "vmem_footprint_mib": 23.35,
+      "cross_rank_straggler_skew_ratio": 1.58
+    },
+    "fused_w13_w2_hybrid_ep8_tp2": {
+      "total_tensorcore_xla_ms": 35.748,
+      "jit_step_fun_impl_p50_ms": 32.72,
+      "gmm_v2_fused_w13_w2_moe_ms": 10.118,
+      "ici_collectives_all_reduce_all_gather_ms": 6.967,
+      "rpa_v3_attention_ms": 5.512,
+      "dense_gemm_and_mhc_ms": 13.151,
+      "vmem_footprint_mib": 23.35,
+      "cross_rank_straggler_skew_ratio": 1.19
+    }
+  },
+  "throughput_1k1k_16k_ctx": {
+    "C64_warm": {
+      "xprof_baseline_tok_s": 1524.2,
+      "xprof_baseline_tpot_ms": 39.2,
+      "local_vmem_only_tok_s": 1525.1,
+      "local_vmem_only_tpot_ms": 39.2,
+      "fused_ep8_tp2_tok_s": 1740.4,
+      "fused_ep8_tp2_tpot_ms": 34.5,
+      "speedup_pct_vs_xprof_baseline": 14.18
+    },
+    "C128_warm": {
+      "xprof_baseline_tok_s": 2521.0,
+      "xprof_baseline_tpot_ms": 45.5,
+      "local_vmem_only_tok_s": 2539.7,
+      "local_vmem_only_tpot_ms": 45.0,
+      "fused_ep8_tp2_tok_s": 2984.5,
+      "fused_ep8_tp2_tpot_ms": 38.5,
+      "speedup_pct_vs_xprof_baseline": 18.39
+    },
+    "C185_single_wave": {
+      "xprof_baseline_tok_s": 3896.2,
+      "local_vmem_only_tok_s": 3925.4,
+      "fused_ep8_tp2_tok_s": 4643.6,
+      "fused_ep8_tp2_tok_s_per_chip": 290.2,
+      "speedup_pct_vs_xprof_baseline": 19.18
+    },
+    "C190_single_wave_max_saturation": {
+      "xprof_baseline_tok_s": 3992.6,
+      "local_vmem_only_tok_s": 4003.7,
+      "fused_ep8_tp2_tok_s": 4758.5,
+      "fused_ep8_tp2_tok_s_per_chip": 297.4,
+      "speedup_pct_vs_xprof_baseline": 19.18
+    },
+    "C256_two_wave": {
+      "xprof_baseline_tok_s": 2447.8,
+      "xprof_baseline_tpot_ms": 50.2,
+      "local_vmem_only_tok_s": 2445.0,
+      "local_vmem_only_tpot_ms": 50.4,
+      "fused_ep8_tp2_tok_s": 2882.6,
+      "fused_ep8_tp2_tpot_ms": 42.9,
+      "speedup_pct_vs_xprof_baseline": 17.76
+    }
+  },
+  "correctness": {
+    "smoke_tests": "4/4 PASS",
+    "greedy_determinism": "16/16 byte-identical",
+    "known_answers_c1": "8/8 PASS",
+    "gpqa_diamond_24q_subset": "21/24 (87.5%) Pass@1, 0/24 repetition loops"
+  }
+}

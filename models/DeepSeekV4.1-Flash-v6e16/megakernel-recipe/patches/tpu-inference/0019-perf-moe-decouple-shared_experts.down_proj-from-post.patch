@@ -1,0 +1,60 @@
+From b71210c3a25aadf3b807174ba1bd80acd1d3b61e Mon Sep 17 00:00:00 2001
+From: Jawad Amin <jawadamin@google.com>
+Date: Wed, 23 Sep 2026 15:06:48 +0000
+Subject: [PATCH 19/25] perf(moe): decouple shared_experts.down_proj from
+ post-MoE psum_scatter via optimization_barrier
+
+---
+ tpu_inference/layers/common/fused_moe_gmm.py          | 10 ++++++----
+ tpu_inference/models/vllm/experimental/deepseek_v4.py |  4 ++++
+ 2 files changed, 10 insertions(+), 4 deletions(-)
+
+diff --git a/tpu_inference/layers/common/fused_moe_gmm.py b/tpu_inference/layers/common/fused_moe_gmm.py
+index 7b4b306c..8e304bd7 100644
+--- a/tpu_inference/layers/common/fused_moe_gmm.py
++++ b/tpu_inference/layers/common/fused_moe_gmm.py
+@@ -338,10 +338,12 @@ def moe_gmm_local(x: jax.Array,
+                 chunk_hidden = jax.lax.psum(chunk_hidden,
+                                             axis_name=reduce_axes)
+             if scatter_axes:
+-                out = jax.lax.psum_scatter(chunk_hidden,
+-                                           axis_name=scatter_axes,
+-                                           scatter_dimension=0,
+-                                           tiled=True).astype(x.dtype)
++                out = jax.lax.psum_scatter(
++                    chunk_hidden.astype(x.dtype),
++                    axis_name=scatter_axes,
++                    scatter_dimension=0,
++                    tiled=True)
++                out = jax.lax.optimization_barrier(out)
+             else:
+                 out = chunk_hidden.astype(x.dtype)
+         else:
+diff --git a/tpu_inference/models/vllm/experimental/deepseek_v4.py b/tpu_inference/models/vllm/experimental/deepseek_v4.py
+index c1fe183e..30126e64 100644
+--- a/tpu_inference/models/vllm/experimental/deepseek_v4.py
++++ b/tpu_inference/models/vllm/experimental/deepseek_v4.py
+@@ -4,9 +4,11 @@ import typing
+ from collections.abc import Callable, Iterable
+ from itertools import islice
+ 
++import jax
+ import regex as re
+ import torch
+ import torch.nn as nn
++from torchax.interop import jax_view, torch_view
+ from vllm.config import VllmConfig
+ from vllm.distributed import (get_pp_group, get_tensor_model_parallel_rank,
+                               get_tensor_model_parallel_world_size)
+@@ -89,6 +91,8 @@ class DeepseekV4MLP(nn.Module):
+         gate_up, _ = self.gate_up_proj(x)
+         x = self.act_fn(gate_up)
+         x, _ = self.down_proj(x)
++        if not self.down_proj.reduce_results:
++            x = torch_view(jax.lax.optimization_barrier(jax_view(x)))
+         return x
+ 
+ 
+-- 
+2.56.0.rc1.310.g51773c2048-goog
+

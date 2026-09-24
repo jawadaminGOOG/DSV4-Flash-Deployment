@@ -1,0 +1,46 @@
+From 6116c0e4f7e7274336a3abd61a0c449c3b55de06 Mon Sep 17 00:00:00 2001
+From: Jawad Amin <jawadamin@google.com>
+Date: Wed, 16 Sep 2026 19:45:15 +0000
+Subject: [PATCH 10/18] Give the attention-internal trace its own switch
+
+One environment variable turned on both the layer-level trace and the
+attention-internal trace. The attention trace prints four tensors for every
+layer, so it more than doubles the host callbacks in the graph, and it raises
+both the compile time and the decode time of a run that only needs the
+layer-level profile.
+
+Read `DSV41_TRACE_ATTN_INTERNALS` for the attention trace instead. The
+layer-level trace names a layer first, and the attention trace then reads
+inside that layer.
+---
+ .../experimental/deepseek_v41/deepseek_v41_attention.py  | 9 +++++++--
+ 1 file changed, 7 insertions(+), 2 deletions(-)
+
+diff --git a/tpu_inference/layers/vllm/custom_ops/experimental/deepseek_v41/deepseek_v41_attention.py b/tpu_inference/layers/vllm/custom_ops/experimental/deepseek_v41/deepseek_v41_attention.py
+index e5c59c51..d96c8da9 100644
+--- a/tpu_inference/layers/vllm/custom_ops/experimental/deepseek_v41/deepseek_v41_attention.py
++++ b/tpu_inference/layers/vllm/custom_ops/experimental/deepseek_v41/deepseek_v41_attention.py
+@@ -77,13 +77,18 @@ from tpu_inference.models.vllm.vllm_model_wrapper_context import \
+ 
+ logger = init_logger(__name__)
+ 
+-# Set `DSV41_TRACE_LAYER_STATS=1` to print the numeric range of the tensors
++# Set `DSV41_TRACE_ATTN_INTERNALS=1` to print the numeric range of the tensors
+ # inside the attention of each layer. The attention holds the compressor, the
+ # indexer and the sparse kernel, so a `nan` that a layer-level trace shows at
+ # the layer output needs this finer trace to name its source. Each printed
+ # tensor adds a host callback, so the trace changes the compiled graph and
+ # slows the run. Keep it off in production.
+-_TRACE_LAYER_STATS = os.environ.get("DSV41_TRACE_LAYER_STATS") == "1"
++#
++# This trace has its own switch, separate from `DSV41_TRACE_LAYER_STATS`. It
++# prints four tensors for every layer, which costs more compile time and more
++# decode time than the layer-level trace it supports. Turn it on after the
++# layer-level trace names a layer, not before.
++_TRACE_LAYER_STATS = os.environ.get("DSV41_TRACE_ATTN_INTERNALS") == "1"
+ 
+ 
+ def _trace_attn(tag: str, **tensors) -> None:
+-- 
+2.55.0.1082.g2b9226bbc0-goog
+

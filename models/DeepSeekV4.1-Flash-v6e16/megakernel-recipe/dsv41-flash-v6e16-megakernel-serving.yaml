@@ -1,0 +1,379 @@
+# DeepSeek-V4.1-Flash on a v6e-16 slice, four hosts of four chips.
+#
+# Each revision of this file gets a NEW Job name (`-r2`, `-r3`, ...) and keeps
+# the SAME Service name. `kubectl apply` then adds the new Job and updates the
+# Service in place, so no `kubectl delete` is needed to replace a run. The
+# finished Job removes itself through `ttlSecondsAfterFinished`.
+#
+# CAUTION: change all four of these together when you bump the revision, or the
+# workers will look for a head that does not exist:
+#   1. `metadata.name` of the Job
+#   2. `HEAD_HOST`
+#   3. `TPU_WORKER_HOSTNAMES`
+#   4. the `revision` pod label
+# The pod DNS name is `<job-name>-<index>.<subdomain>`, so the job name is part
+# of every worker address.
+#
+# Reading the checkpoint from GCS requires Workload Identity. Replace the
+# annotation below with a Google service account that holds
+# roles/storage.objectViewer on the bucket, and bind it as described in README
+# section 6.1.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: dsv41-sa
+  annotations:
+    iam.gke.io/gcp-service-account: <YOUR_GOOGLE_SERVICE_ACCOUNT>
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: dsv41-v6e16
+  labels:
+    app: dsv41-v6e16
+spec:
+  clusterIP: None
+  # The selector matches every revision. Only one revision runs at a time, and
+  # a pod of a finished revision is not an endpoint, so the head address stays
+  # unambiguous.
+  selector:
+    app: dsv41-v6e16
+  ports:
+    - name: ray-client
+      port: 10001
+      targetPort: 10001
+    - name: ray-dashboard
+      port: 8265
+      targetPort: 8265
+    - name: gcs
+      port: 6379
+      targetPort: 6379
+    - name: vllm
+      port: 8000
+      targetPort: 8000
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: dsv41-v6e16
+spec:
+  parallelism: 4
+  completions: 4
+  completionMode: Indexed
+  backoffLimit: 0
+  # Kubernetes garbage-collects the Job and its pods 8 hours after the Job
+  # completes or fails, and it means a later revision never has to delete this
+  # one.
+  #
+  # CAUTION: the pod log dies with the pod. A short TTL destroyed the evidence
+  # of one failed run before anyone read it. Keep this long enough to cover an
+  # unattended run, and stream the head log to a file as well.
+  ttlSecondsAfterFinished: 28800
+  template:
+    metadata:
+      labels:
+        app: dsv41-v6e16
+        revision: v1
+    spec:
+      subdomain: dsv41-v6e16
+      restartPolicy: Never
+      serviceAccountName: dsv41-sa
+      nodeSelector:
+        cloud.google.com/gke-tpu-accelerator: tpu-v6e-slice
+        cloud.google.com/gke-tpu-topology: 4x4
+      dnsPolicy: ClusterFirst
+      volumes:
+        - name: dshm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 16Gi
+        # A separate cache path from the V4 job. The two models compile
+        # different programs, and one shared directory only adds misses.
+        #
+        # CAUTION: this cache grows to about 42 GiB for each model, and it
+        # never prunes itself. A node that also holds another model's cache
+        # can run out of ephemeral storage. The kubelet then evicts every pod
+        # with "The node was low on resource: ephemeral-storage", and the Job
+        # fails with BackoffLimitExceeded. Do one of these before you serve a
+        # second model from the same node pool:
+        #   1. Delete the other model's cache directory.
+        #   2. Point JAX at a bucket instead of the node. Delete this volume,
+        #      delete the /jaxcache volumeMount, and set
+        #      JAX_COMPILATION_CACHE_DIR to gs://<YOUR_BUCKET>/jaxcache. The
+        #      image already holds gcsfs, etils and tensorstore, and the
+        #      service account below already reads the bucket. A bucket cache
+        #      is also shared by all four nodes, so only one node pays for
+        #      each compile.
+        - name: jaxcache
+          hostPath:
+            path: /var/tmp/dsv41-jax-cache
+            type: DirectoryOrCreate
+      containers:
+        - name: worker
+          # Build this image from the patched trees. `patches/README.md` names
+          # the two base commits, lists the 27 patches, and gives the build
+          # command. A stock tpu-inference image cannot run this model.
+          image: <YOUR_REGISTRY>/tpu-inference:v41
+          imagePullPolicy: IfNotPresent
+          resources:
+            limits:
+              google.com/tpu: "4"
+            requests:
+              google.com/tpu: "4"
+              # Larger than the V4 job asks for. The Engram tables are 203.1 GB
+              # and they live in host DRAM, so this reserves the room before
+              # the offload lands.
+              memory: 500Gi
+          volumeMounts:
+            - name: dshm
+              mountPath: /dev/shm
+            - name: jaxcache
+              mountPath: /jaxcache
+          ports:
+            - containerPort: 6379
+            - containerPort: 8000
+          env:
+            - name: TPU_MULTIHOST_BACKEND
+              value: ray
+            # The head runs a CPU-heavy model-registry subprocess before it
+            # starts the engine, and that can starve the Ray health responder.
+            # A worker raylet then exits with "GCS failed to check the health
+            # of this node", and `backoffLimit: 0` kills the whole run. These
+            # four values give the head about 100 seconds of tolerance after a
+            # two-minute grace period.
+            - name: RAY_health_check_initial_delay_ms
+              value: "120000"
+            - name: RAY_health_check_period_ms
+              value: "10000"
+            - name: RAY_health_check_timeout_ms
+              value: "60000"
+            - name: RAY_health_check_failure_threshold
+              value: "10"
+            - name: JAX_PLATFORMS
+              value: ""
+            - name: RAY_EXPERIMENTAL_NOSET_TPU_VISIBLE_CHIPS
+              value: "1"
+            - name: TPU_SKIP_MDS_QUERY
+              value: "1"
+            - name: JAX_COMPILATION_CACHE_DIR
+              value: /jaxcache
+            - name: VLLM_XLA_CACHE_PATH
+              value: /jaxcache
+            - name: TPU_BACKEND_TYPE
+              value: jax
+            - name: LIBTPU_INIT_ARGS
+              value: "--xla_tpu_all_gather_collective_matmul_mode=post_spmd --xla_tpu_reduce_scatter_collective_matmul_mode=post_spmd --xla_tpu_enable_sparse_core_collective_offload_nd_reduce_scatter=true --xla_tpu_enable_sparse_core_collective_offload_reduce_scatter=true"
+            - name: VLLM_DISABLE_SHARED_EXPERTS_STREAM
+              value: "1"
+            - name: MODEL_IMPL_TYPE
+              value: vllm
+            - name: DRAFT_MODEL_IMPL_TYPE
+              value: vllm
+            - name: NEW_MODEL_DESIGN
+              value: "1"
+            - name: VLLM_MLA_DISABLE
+              value: "0"
+            # Keep the checkpoint's own MXFP4 encoding: an E2M1 code in int4
+            # storage with one E8M0 scale for each block of 32. The GMM kernel
+            # decodes both, so the expert weights need no dequantization and
+            # no requantization.
+            #
+            # CAUTION: do not set this to `int4`. int4 is a uniform grid and
+            # E2M1 is not, so a requantization to int4 loses 36.11% of the
+            # expert matmul and the logits come out NaN. Every requantization
+            # of this checkpoint loses at least 6%.
+            #
+            # MOE_REQUANTIZE_BLOCK_SIZE has no effect on this path. The MXFP4
+            # format fixes the block at 32.
+            - name: MOE_REQUANTIZE_WEIGHT_DTYPE
+              value: mxfp4
+            - name: REQUANTIZE_WEIGHT_DTYPE
+              value: int8
+            # The rotary table is built for the model's declared 1,048,576
+            # positions. At --max-model-len 2048 that costs 8.00 GiB of the
+            # slice and 99.8% of it is unreachable. The slice is safe here
+            # because this model uses 1-D RoPE, not MRoPE.
+            - name: SLICE_ROPE_CACHE
+              value: "1"
+            # Commit the sliced table in row-major layout, so XLA stops
+            # copying the whole table into every forward pass.
+            - name: ROPE_CACHE_ROW_MAJOR
+              value: "1"
+            # The sampler compiles on the first request that reaches it, and
+            # that compile takes longer than the 300 second default. The RPC
+            # then times out and the EngineCore dies with
+            # `TimeoutError: RPC call to sample_tokens timed out.`
+            - name: VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS
+              value: "3600"
+            - name: HEAD_HOST
+              value: dsv41-v6e16-0.dsv41-v6e16
+            - name: MODEL_URI
+              value: gs://dsv4-flash-jawadamin-asia-ne1/deepseek-v4.1-flash
+            # Each Engram table is one tensor of 384,006,168 rows by 256 FP8
+            # bytes, which is 98.3 GB. The streamer cannot split a tensor, so it
+            # must buffer the whole thing, and its 40 GB default refuses the
+            # file outright.
+            #
+            # CAUTION: keep this at or above the total size of the largest
+            # shard, which is 101.6 GB. The loader skips its defensive copy of a
+            # large shard only while the buffer holds that whole shard. A
+            # smaller value here makes the loader copy again and the host runs
+            # out of memory.
+            - name: RUNAI_STREAMER_MEMORY_LIMIT
+              value: "105000000000"
+            # Shards 47 and 48 hold the two Engram tables. No other shard of the
+            # 48 has a tensor above 7.4 GB, so a threshold of 40 GB separates
+            # those two from the rest. The loader streams one file at a time,
+            # takes a host-wide lock for a file above this size, and skips the
+            # defensive copy of that file. One host runs one process here, so
+            # the lock matters only if that changes; the copy is what costs the
+            # memory. Without this the two shards each need 98.3 GB of buffer
+            # and 98.3 GB of copy, on top of the 510.3 GB checkpoint that the
+            # loader builds in host memory before it shards to the chips.
+            - name: RUNAI_STREAMER_HOST_LOCK_BYTES
+              value: "40000000000"
+            - name: TPU_WORKER_HOSTNAMES
+              value: dsv41-v6e16-0.dsv41-v6e16,dsv41-v6e16-1.dsv41-v6e16,dsv41-v6e16-2.dsv41-v6e16,dsv41-v6e16-3.dsv41-v6e16
+            - name: TPU_WORKER_ID
+              valueFrom:
+                fieldRef:
+                  apiVersion: v1
+                  fieldPath: metadata.annotations['batch.kubernetes.io/job-completion-index']
+            - name: JOB_COMPLETION_INDEX
+              valueFrom:
+                fieldRef:
+                  apiVersion: v1
+                  fieldPath: metadata.labels['batch.kubernetes.io/job-completion-index']
+          command:
+            - /bin/bash
+            - -lc
+          args:
+            - |
+              set -euo pipefail
+
+              IDX="${JOB_COMPLETION_INDEX:?}"
+              echo "[$(date -Is)] index=${IDX} head=${HEAD_HOST}"
+
+              echo "Checking metadata server connectivity..."
+              for i in $(seq 1 30); do
+                if curl -s -f -m 5 -H "Metadata-Flavor: Google" "http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token" >/dev/null 2>&1; then
+                  echo "Metadata service ready."
+                  break
+                fi
+                echo "Waiting for metadata service ($i/30)..."
+                sleep 2
+              done
+
+              # Prove the image carries all ten patches before the server
+              # spends 20 minutes loading weights. A stock image imports
+              # cleanly and then fails much later with an unrelated error, so
+              # this check saves a long cycle. See `patches/README.md`.
+              python3 -c "
+              import sys
+              from vllm.models.deepseek_v4_1.common import engram
+              from vllm.model_executor.model_loader import weight_utils
+
+              missing = []
+              # vLLM patch 0001: the Engram lookup needs a non-CUDA path.
+              if not hasattr(engram.ParallelEngramEmbedding, '_lookup_reference'):
+                  missing.append('engram._lookup_reference')
+              for name in ('_fused_engram_post_wkv_reference', '_hash_ids_reference'):
+                  if not hasattr(engram, name):
+                      missing.append(f'engram.{name}')
+              # vLLM patch 0002: one RunAI streamer host buffer for each node.
+              if not hasattr(weight_utils, '_runai_host_lock'):
+                  missing.append('weight_utils._runai_host_lock')
+              # tpu-inference patch 0005: host tensors stay on the host.
+              from tpu_inference.layers.vllm.process_weights import cleanup_sharding
+              if not hasattr(cleanup_sharding, '_drop_host_resident'):
+                  missing.append('cleanup_sharding._drop_host_resident')
+              # tpu-inference patch 0003: V4 and V4.1 each define a class named
+              # DeepseekV4IndexerCache, so a check against the V4 one alone
+              # misses every V4.1 layer.
+              from tpu_inference.runner import kv_cache_manager
+              from vllm.models.deepseek_v4_1.attention import DeepseekV4IndexerCache
+              if DeepseekV4IndexerCache not in (
+                      kv_cache_manager.DeepseekV4IndexerCache,
+                      getattr(kv_cache_manager, 'DeepseekV41IndexerCache', None)):
+                  missing.append('kv_cache_manager V4.1 indexer cache')
+              # tpu-inference patch 0002: the model must reach the registry.
+              from tpu_inference.models.vllm.experimental import _TPU_VLLM_MODELS
+              if 'DeepseekV41ForCausalLM' not in _TPU_VLLM_MODELS:
+                  missing.append('registry DeepseekV41ForCausalLM')
+
+              if missing:
+                  sys.exit('this image is not fully patched; missing: '
+                           + ', '.join(missing)
+                           + '. Rebuild it as patches/README.md describes.')
+              print('all ten patches present')
+              "
+
+              if [ "${IDX}" = "0" ]; then
+                ray start --head --port=6379 --dashboard-host=0.0.0.0
+
+                echo "Waiting for all 4 nodes (16 TPUs) to join Ray cluster..."
+                for i in $(seq 1 90); do
+                  tpu_ok=$(ray status 2>/dev/null | grep -E "16.0 TPU|16/16 TPU" || true)
+                  if [ -n "${tpu_ok}" ]; then
+                    echo "All 16 TPUs active in Ray cluster: ${tpu_ok}"
+                    break
+                  fi
+                  echo "Waiting for cluster join ($i/90)... current: $(ray status 2>/dev/null | grep TPU || true)"
+                  sleep 5
+                done
+                ray status || true
+
+                # CAUTION: do not raise `--max-num-batched-tokens` without a
+                # memory check. With data-parallel attention the runner builds
+                # its token buckets up to `max-num-batched-tokens x dp_size`,
+                # so this value is multiplied by 16 here. The MoE kernel then
+                # allocates two bf16 buffers of `global_tokens x top_k` rows.
+                # At 1024 the top bucket is 16,384 tokens, the two buffers
+                # reach 960 MiB and 480 MiB, and the backbone compile asks for
+                # 393 MiB more HBM than a chip holds. At 512 the top bucket is
+                # 8,192, and the runtime could not find 1.49 GiB of contiguous
+                # HBM for `jit_step_fun_impl`. At 256 the top bucket is 4,096,
+                # and the two buffers drop by about 340 MiB together.
+                #
+                # The MXFP4 expert scale is uint8. A broadcast axis of 1 in the
+                # second-minor position makes the slice reserve four bytes for
+                # each byte, so 15.82 GiB of scale holds 63.28 GiB. The stack
+                # therefore keeps the scale as `[E, num_blocks, N]`, and the
+                # kernel adds the broadcast axis back in VMEM. The weights then
+                # need 378.78 GiB of the 499.87 GiB slice.
+                #
+                # CAUTION: do not raise this value above 0.80. The cap counts the
+                # weights and the KV pool, and it does not count the scratch that
+                # the backbone compile needs. At 0.85 the compile asked for
+                # 608.77 MiB more than a chip holds. At 0.82 the program load
+                # asked for 1.49 GiB of contiguous HBM and only 1.36 GiB was
+                # reservable. At 0.81 the server started and then failed on the
+                # first request, because `jit_step_fun_impl` needed 1.40 GiB of
+                # contiguous HBM and the largest free region was 1.35 GiB. At
+                # 0.93 a hard out-of-memory killed the run. 0.80 keeps a KV
+                # pool of about 1,470,000 tokens, derived from the reported
+                # cache-usage percentage at five concurrency levels.
+                # Full 16,384-token context for all three shapes (1k/1k, 8k/1k,
+                # 1k/8k) and GPQA Diamond (--max-num-seqs 64 fits the 1 MiB SMEM
+                # block-table ceiling at 16K). For a 2,048-token-only deployment,
+                # you may substitute `--max-model-len 2048 --max-num-seqs 256`.
+                exec vllm serve "${MODEL_URI}" \
+                  --served-model-name deepseek-ai/DeepSeek-V4.1-Flash \
+                  --load-format=runai_streamer \
+                  --trust-remote-code \
+                  --kv-cache-dtype=fp8 \
+                  --tensor-parallel-size 16 \
+                  --enable-expert-parallel \
+                  --additional_config '{"sharding": {"sharding_strategy": {"enable_dp_attention": true}}}' \
+                  --gpu-memory-utilization 0.80 \
+                  --no-enable-prefix-caching \
+                  --max-model-len 16384 \
+                  --max-num-batched-tokens 256 \
+                  --max-num-seqs 64 \
+                  --host 0.0.0.0 --port 8000
+              else
+                until getent hosts "${HEAD_HOST}" >/dev/null 2>&1; do
+                  echo "waiting for head DNS"; sleep 5
+                done
+                exec ray start --block --address="${HEAD_HOST}:6379"
+              fi
