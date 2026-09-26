@@ -169,21 +169,21 @@ This **3-instruction bitwise sequence** is **bit-for-bit identical (`max_abs_dif
 
 | Concurrency (`C`) | Baseline Output `tok/s` | Optimized Output `tok/s` | Throughput Gain | Baseline TPOT (`ms`) | Optimized TPOT (`ms`) | TPOT Reduction |
 |---:|---:|---:|---:|---:|---:|---:|
-| **`1`** | `17.9 tok/s` | **`26.8 tok/s`** *(425.5 w/ [Megakernel](../../megakernel-recipe/README.md))* | **`+49.7%`** *(15.9× w/ Megakernel)* | `54.7 ms` | **`37.3 ms`** *(2.35 ms)* | **`-31.8%`** |
-| **`16`** | `354.1 tok/s` | **`421.0 tok/s`** *(1,427.0 w/ [Megakernel](../../megakernel-recipe/README.md))* | **`+18.9%`** *(3.4× w/ Megakernel)* | `44.1 ms` | **`38.0 ms`** *(11.2 ms)* | **`-13.8%`** |
+| **`1`** | `18.3 tok/s` | **`22.3 tok/s`** *(179.5–222.2 w/ [Megakernel + DSpark](../../megakernel-recipe/README.md))* | **`+21.9%`** *(8.04×–9.95× w/ Megakernel)* | `54.6 ms` | **`44.78 ms`** *(5.57 / 4.50 ms)* | **`-18.0%`** |
+| **`16`** | `361.2 tok/s` | **`375.4 tok/s`** *(417.9 w/ [Megakernel](../../megakernel-recipe/README.md))* | **`+3.9%`** *(1.11× w/ Megakernel)* | `44.3 ms` | **`42.62 ms`** *(38.29 ms)* | **`-3.8%`** |
 | **`32`** | `655.0 tok/s` | **`828.9 tok/s`** | **`+26.5%`** | `46.7 ms` | **`38.6 ms`** | **`-17.3%`** |
-| **`64`** | `858.3 tok/s` | **`1,524.5 tok/s`** | **`+77.6%`** | `68.6 ms` | **`39.2 ms`** | **`-42.9%`** |
-| **`128`** | `2,017.6 tok/s` | **`2,520.7 tok/s`** | **`+24.9%`** | `57.1 ms` | **`45.3 ms`** | **`-20.7%`** |
-| **`190–256`** | `3,164.1 tok/s` (`3,980` engine) | **`3,354.5 tok/s`** (**`4,046.1` engine**) | **`+6.0%` client / `+27.9%` engine** | `69.2 ms` | **`44.6 ms`** | **`-35.5%`** |
+| **`64`** | `858.3 tok/s` | **`1,524.2 tok/s`** | **`+77.6%`** | `68.6 ms` | **`39.2 ms`** | **`-42.9%`** |
+| **`128`** | `2,017.6 tok/s` | **`2,521.0 tok/s`** | **`+24.9%`** | `57.1 ms` | **`45.5 ms`** | **`-20.3%`** |
+| **`190–256`** | `3,164.1 tok/s` (`3,980` engine) | **`3,992.6 tok/s`** (**`4,758.5` w/ [Fused MoE](../../fused-kernels-recipe/README.md)**) | **`+26.2%` (`+50.4%` Fused)** | `69.2 ms` | **`45.1 ms`** (`37.8 ms` Fused) | **`-34.8%`** |
 | **`512`** | `4,310.5 tok/s` (`5,137` peak) | **`4,512.0 tok/s`** (**`5,380` peak**) | **`+4.7%`** | `94.8 ms` | **`77.3 ms`** | **`-18.5%`** |
 
 All optimizations preserve **100% greedy determinism (`16/16` byte-for-bit identical trajectories)** and full-context **GPQA Diamond accuracy (`94.8%` on completed reasoning chains, `0.0%` repetition loops)**.
 
 ---
 
-## 6. Dual-Regime Envelope: Batched XLA (`C >= 24`) vs. Persistent Pallas Megakernel (`C = 1..24`)
+## 6. Dual-Regime Envelope: Batched XLA (`C > 16`) vs. 40-Layer Pallas Decode Megakernel (`C = 1..16`)
 
-At low concurrency (`C = 1..24`), per-kernel XLA dispatch barriers (`2,850` launches/step) and static `gmm_v2` weight streaming become the dominant bottleneck. Our companion **[`megakernel-recipe/`](../../megakernel-recipe/README.md)** fuses all 51 layers into a single persistent VMEM Pallas kernel (`12.99 / 16.00 MiB` VMEM) paired with `DSpark` (`1+7`) speculative decoding, reaching **`425.5 tok/s/req` (`2.35 ms/token`, `15.9×` faster at `C=1`)**:
+At low concurrency (`C = 1..16`), per-kernel XLA dispatch barriers and static `gmm_v2` weight streaming become the dominant bottleneck. Our companion **[`megakernel-recipe/`](../../megakernel-recipe/README.md)** wraps all 40 layers into a single Pallas decode megakernel (`1` `tpu_custom_call` per step) paired with `DSpark` (`mtp.0..2` lossless `1+4` speculative decoding, `3.48 tok/step` mean acceptance), reaching **`179.5 tok/s` median (`5.57 ms` TPOT, `8.04×` faster) and up to `222.2 tok/s` (`4.50 ms` TPOT, `9.95×` faster) at `C=1`** (`117.8 tok/s` / `8.49 ms` non-speculative):
 
-![DeepSeek-V4.1-Flash Megakernel vs. Batched XLA Throughput & Latency](../../megakernel-recipe/results/charts/megakernel-vs-batched-xla.png)
+![DeepSeek-V4.1-Flash Megakernel vs. Fused Kernel vs. Base XLA Throughput & Latency](../../megakernel-recipe/results/charts/megakernel-vs-fused-vs-base-xla.png)
 

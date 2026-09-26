@@ -1,0 +1,70 @@
+{
+  "model_uri": "gs://dsv4-flash-jawadamin-asia-ne1/deepseek-v4.1-flash",
+  "tensors": {
+    "embed.weight": {
+      "shard": "model-00002-of-00048.safetensors",
+      "dtype": "BF16",
+      "shape": [
+        129280,
+        5120
+      ],
+      "nbytes": 1323827200,
+      "hash_mode": "head4M_tail1M",
+      "sha256": "3b14dd76fa6c0c0aa2a528404ec5bfc471bf93c41b961a08e1955c4c712716c9"
+    },
+    "layers.0.attn.wq_a.weight": {
+      "shard": "model-00003-of-00048.safetensors",
+      "dtype": "F8_E4M3",
+      "shape": [
+        1280,
+        5120
+      ],
+      "nbytes": 6553600,
+      "hash_mode": "full",
+      "sha256": "d75dd17b5fd33533ab8269412e23c01a44314fd719b8e0d274cd437b3f125af7"
+    },
+    "layers.0.ffn.experts.0.w1.weight": {
+      "shard": "model-00003-of-00048.safetensors",
+      "dtype": "I8",
+      "shape": [
+        2304,
+        2560
+      ],
+      "nbytes": 5898240,
+      "hash_mode": "full",
+      "sha256": "84c55fa21fcbf91d97372c49ab1556220d50fd613219b9fe975da493e071d9a4"
+    },
+    "layers.14.attn.compressor.wkv.weight": {
+      "shard": "model-00017-of-00048.safetensors",
+      "dtype": "BF16",
+      "shape": [
+        512,
+        5120
+      ],
+      "nbytes": 5242880,
+      "hash_mode": "full",
+      "sha256": "42318c7477d6948b6ee6b9f9fa4c2b0377344fbcf11a9f3832dc26d3f5ab5888"
+    },
+    "layers.39.ffn.gate.weight": {
+      "shard": "model-00042-of-00048.safetensors",
+      "dtype": "BF16",
+      "shape": [
+        384,
+        5120
+      ],
+      "nbytes": 3932160,
+      "hash_mode": "full",
+      "sha256": "8ff7c88eb8478365a88697edb79f436c17db765d753c7a1e7959c365f06e46a9"
+    },
+    "norm.weight": {
+      "shard": "model-00043-of-00048.safetensors",
+      "dtype": "BF16",
+      "shape": [
+        5120
+      ],
+      "nbytes": 10240,
+      "hash_mode": "full",
+      "sha256": "9cd3b57cd9513541b9771bf66c9b356bf1a7b20ff050ed69f7e97cff9fedd428"
+    }
+  }
+}

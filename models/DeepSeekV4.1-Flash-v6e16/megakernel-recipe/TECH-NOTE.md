@@ -1,153 +1,92 @@
-# DeepSeek-V4.1-Flash Persistent Pallas Megakernel & DSpark Recipe (`TPU v6e-16`)
+# Technical Note: DeepSeek-V4.1-Flash 40-Layer Pallas Decode Megakernel & `DSpark` (`mtp.0..2`) on `TPU v6e-16`
 
-This directory contains a standalone **51-layer Persistent Pallas Megakernel + `DSpark` (`1+7`) Speculative Decoding** engine for **DeepSeek-V4.1-Flash** (`552B` total parameters, `16B` active parameters, `384` routed experts) on a 16-chip **TPU v6e** (`4×4` 2D optical torus) slice.
-
-While the main [`models/DeepSeekV4.1-Flash-v6e16/`](../models/DeepSeekV4.1-Flash-v6e16/README.md) recipe optimizes batched XLA execution for high-throughput serving (`C = 32..512`, reaching **`5,137 tok/s`**), this megakernel recipe solves the opposite end of the serving Pareto frontier: **ultra-low-latency interactive generation (`C = 1..16`)**, cutting single-stream time-per-output-token (TPOT) from **`37.33 ms` (`26.8 tok/s`) down to `5.70 ms` (`175.4 tok/s`) natively, and `2.35 ms/token` (`425.5 tok/s/request`, a `15.9×` speedup) with `DSpark` speculative decoding**.
+This technical note documents the exact decode equations, checkpoint weight layouts, `TPU v6e-16` (`4×4` 2D mesh) hardware measurements, lowered HLO structure, and `DSpark` (`mtp.0..2`) speculative verification invariants implemented in [`megakernel/`](megakernel/).
 
 ---
 
-## 1. Motivation: Why Sparse MoE Models Hit a Bandwidth Wall at Low Concurrency
+## 1. Checkpoint Verification & Weight Inventory (`gs://dsv4-flash-jawadamin-asia-ne1/deepseek-v4.1-flash`)
 
-DeepSeek-V4.1-Flash is built around an extreme total-to-active parameter asymmetry: it holds **552B total parameters** across 384 routed experts per layer, but activates only **top-8 experts (`16B` active parameters)** for any single token.
+The checkpoint consists of `48` `safetensors` shards (`475 GiB` total: shards `00001..00046` hold the `40` decoder layers, embedding, final norm, LM head, and `3` `mtp.0..2` layers; shards `00047` and `00048` hold the `L1` and `L14` Engram tables at `101.5 GB` each).
 
-In a standard batched XLA serving engine (`vLLM` + `tpu-inference`), this sparsity pays off handsomely at high concurrency (`C = 64..512`), where hundreds of tokens in a batch collectively touch nearly all 384 experts anyway. At low concurrency (`C = 1..8`), however, standard XLA execution runs into two fundamental hardware bottlenecks on TPU v6e:
+On every load ([`megakernel/load.py`](megakernel/load.py)), six sampled tensors across the checkpoint are verified by SHA-256 against [`results/ckpt_hashes.json`](results/ckpt_hashes.json):
 
-1. **Static Expert Weight Streaming (`22.9 GB/chip/step` vs. `0.58 GB/chip/step` needed):**
-   Under 16-way Expert Parallelism (`EP=16`), each TPU v6e chip holds 24 full experts (`384 / 16 = 24`). Standard grouped matrix multiplication (`gmm_v2`) compiles a static HBM-to-VMEM weight pipeline that streams **all 24 local experts** from High-Bandwidth Memory (HBM) on every layer—even when a `B = 1` decode step only routes to an average of `8 / 16 = 0.5` experts per chip. Across 48 MoE layers, each chip streams **`22.9 GB` of expert weights from HBM per token** when less than **`0.58 GB`** is actually used.
-2. **Per-Layer HBM Round-Trips & Collective Launch Overhead (`~510` kernels/step):**
-   DeepSeek-V4.1-Flash propagates **4 parallel residual streams (`4 × 5,120` `bfloat16`)** between blocks via Manifold-Constrained Hyper-Connections (`mHC`), alongside two inter-chip collectives (`all-gather` and `reduce-scatter`) per layer. In standard XLA execution, these residual streams are written out to HBM and read back over 100 times per token, while 102 inter-chip collective barriers serialize execution across the 51 layers.
+| Tensor Name | Safetensors Shard | Shape | Dtype | Verified SHA-256 |
+|---|---|---|---|---|
+| `embed.weight` | `model-00002-of-00048.safetensors` | `[129280, 5120]` | `BF16` | `3b14dd76fa6c0c0aa2a528404ec5bfc471bf93c41b961a08e1955c4c712716c9` (`head4M_tail1M`) |
+| `layers.0.attn.wq_a.weight` | `model-00003-of-00048.safetensors` | `[1280, 5120]` | `F8_E4M3` | `d75dd17b5fd33533ab8269412e23c01a44314fd719b8e0d274cd437b3f125af7` |
+| `layers.0.ffn.experts.0.w1.weight` | `model-00003-of-00048.safetensors` | `[2304, 2560]` | `I8` (packed `MXFP4`) | `84c55fa21fcbf91d97372c49ab1556220d50fd613219b9fe975da493e071d9a4` |
+| `layers.14.attn.compressor.wkv.weight` | `model-00017-of-00048.safetensors` | `[512, 5120]` | `BF16` | `42318c7477d6948b6ee6b9f9fa4c2b0377344fbcf11a9f3832dc26d3f5ab5888` |
+| `layers.39.ffn.gate.weight` | `model-00042-of-00048.safetensors` | `[384, 5120]` | `BF16` | `8ff7c88eb8478365a88697edb79f436c17db765d753c7a1e7959c365f06e46a9` |
+| `norm.weight` | `model-00043-of-00048.safetensors` | `[5120]` | `BF16` | `9cd3b57cd9513541b9771bf66c9b356bf1a7b20ff050ed69f7e97cff9fedd428` |
 
-At `1,600 GB/s` of HBM bandwidth per TPU v6e chip, streaming `22.9 GB` of mostly unused expert weights plus per-layer collective syncs establishes a hard floor around **`37.3 ms/step` (`26.8 tok/s`)** for a single user stream—leaving over **85% of the TPU's compute and memory bandwidth idle**.
-
----
-
-## 2. Approach: Collapsing 51 Layers into a Single `16 MB` VMEM Scratchpad Megakernel
-
-To break the static HBM weight-streaming floor, we inverted the execution model: instead of launching 510 separate XLA kernels that stream activations to and from HBM, we compiled **all 51 transformer blocks into a single persistent Pallas megakernel (`pl.pallas_call`)** where the model's activations and 4-stream `mHC` residuals **never leave the TPU's `16.00 MB` on-chip VMEM scratchpad** (`12.99 MB` peak resident footprint).
-
-```mermaid
-flowchart LR
-    subgraph Host["Pre-Kernel Prologue (HBM / Host)"]
-        E["Engram O(1) Hash Lookup\nLayers 1 & 14 (64 KB)"]
-        KV["3D Bitcast CSA2 + SWA\nKV Cache Arena"]
-    end
-
-    subgraph VMEM["Persistent 16 MB On-Chip VMEM Scratchpad (51 Layers in 1 Kernel)"]
-        S["4-Stream mHC Residuals\n[4, B, 5120] Pinned in VMEM\n(320 KB — 0 HBM Traffic)"]
-        P["Zero-Copy VMEM Pool Arena\n(6.50 MB reinterpret_cast)\nAttention | Shared Expert | Active Experts"]
-        C["In-VMEM 6-Hop 2D Torus Ring\nmake_async_remote_copy\n(1.08 ms total across 51 layers)"]
-        S <--> P <--> C
-    end
-
-    subgraph HBM["Dynamic HBM Weight Streaming (ETP=4 × EP=4)"]
-        W["Only ~2.0 Active Experts/Row\n(2.50 MB/expert in MXFP4)\n0.58 GB/chip/step (-97.5% HBM)"]
-    end
-
-    E --> VMEM
-    KV <--> VMEM
-    W ==>|"Dynamic Async DMA"| P
-```
-
-Five co-designed techniques make it possible to fit a 552B-parameter architecture inside a `16.00 MB` scratchpad:
-
-### 2.1 Hybrid `ETP=4 × EP=4` Sharding so One Expert Fits in `2.50 MB` of VMEM
-Under pure Expert Parallelism (`EP=16`), a single unsharded expert (`w13: 5120 × 4608`, `w2: 2304 × 5120`) occupies `22.5 MB` in `bfloat16` or `10.5 MB` in 4-bit `MXFP4`—too large to stage inside a `16 MB` VMEM scratchpad alongside activations.
-
-We reshaped the `4×4` TPU v6e torus into **4 Expert-Parallel rows (`ep_y = 4`) × 4 Expert-Tensor-Parallel columns (`etp_x = 4`)** ([`collectives16.py`](megakernel/collectives16.py)):
-- Each `ep_y` row of 4 chips holds **96 experts** (`384 / 4 = 96`).
-- Across the 4 chips in a row (`etp_x = 4`), each expert's intermediate dimension is partitioned 4-way (`N_shard = 1152` for `w13`, `K_shard = 576` for `w2`).
-- Stored in packed 4-bit `MXFP4` (`uint8` nibbles + `e8m0` block scales), **one complete expert slice on a chip is just `2.50 MB` (`1.25 MB` for `w13` + `1.25 MB` for `w2`)**!
-- During decode (`B = 1`), top-8 routing selects on average only **`8 / 4 = 2.0` active experts per torus row**. The megakernel issues asynchronous HBM-to-VMEM DMAs **only for those ~2 active experts**, dropping HBM weight traffic from `22.9 GB/chip/step` to **`0.58 GB/chip/step` (`-97.5%`)**.
-
-### 2.2 Zero-Allocation Scratchpad Reuse via `VmemPoolAllocator` (`reinterpret_cast`)
-Pallas does not natively support dynamic memory allocation (`malloc`/`free`) inside a kernel, and allocating separate VMEM buffers for Attention (`4.0 MB`), Shared Experts (`5.0 MB`), and Routed Experts (`2.5 MB × 2`) would exceed `16.00 MB`.
-
-In [`pool_alias.py`](megakernel/pool_alias.py), we implemented **`VmemPoolAllocator`**, which reserves a single **`6.50 MB` backing VMEM buffer (`uint8[6815744]`)** and uses `libtpu.reinterpret_cast` to alias stage-specific tensor views (`q_proj`, `kv_stage`, `shared_w13`, `routed_expert_ping`, `routed_expert_pong`) at disjoint time intervals within each layer loop. This keeps total static VMEM allocation across the entire 51-layer kernel at **`12.99 MB / 16.00 MB`** (`81.2%` utilization) with zero HBM spill.
-
-### 2.3 Persistent In-VMEM 4-Stream `mHC` Residuals & Hoisted `Engram` Prologue
-DeepSeek-V4.1-Flash's 4-stream Manifold-Constrained Hyper-Connections (`[4, B, 5120]` `bfloat16` = `320 KB` at `B = 8`) are allocated once in `streams_vmem_ref` ([`decode_megakernel.py`](megakernel/decode_megakernel.py)) and updated in-place across all 51 layers using Single-Pass `mHC` coefficients—eliminating all 102 HBM residual reads and writes. Similarly, the `O(1)` deterministic hash lookups for the **Engram** memory tables at Layers 1 and 14 depend only on input token IDs; [`engram_prologue.py`](megakernel/engram_prologue.py) hoists both lookups into a `64 KB` VMEM buffer (`engram_embs_vmem`) before layer 0 begins.
-
-### 2.4 In-VMEM 6-Hop 2D Torus Ring Collectives
-Instead of exiting the kernel to run XLA collectives, [`collectives16.py`](megakernel/collectives16.py) executes inter-chip reductions directly between VMEM scratchpads using `pltpu.make_async_remote_copy` over the `4×4` optical torus (`3` horizontal hops across `etp_x` for `all-reduce` + `3` vertical hops across `ep_y` for expert routing), consuming just **`1.08 ms` total across all 51 layers**.
-
-### 2.5 `DSpark` (`1 Anchor + 7 Draft`) Speculative Decoding Exploit of Semantic Expert Locality
-DeepSeek-V4.1-Flash includes a lightweight single-layer Multi-Token Prediction head (**`DSpark`**, `mtp.0.*`). In [`dspark.py`](megakernel/dspark.py), `DSpark` drafts **7 candidate tokens** in **`1.334 ms`** (`0.19 ms/draft step`), and the 51-layer megakernel verifies all **`B = 8` tokens (`1 anchor + 7 draft`) in a single `8.445 ms` pass**.
-
-Crucially, because all 8 tokens in a `DSpark` verification batch belong to the **same causal trajectory**, they exhibit **~70% semantic expert overlap** (`4.52` unique active local experts per row instead of `14.69` for 8 unrelated users). One `9.779 ms` draft-and-verify cycle accepts an average of **`4.16` tokens** (`alpha = 0.80`), yielding an effective latency of **`2.35 ms/token` (`425.5 tok/s` for a single stream)**.
+### Quantization Formats Handled
+1. **Dense & Shared-Expert `FP8` (`32 × 32` Block-Scaled `E4M3` + `UE8M0`):**
+   Weight tensors (`wq_a`, `wq_b`, `wo_a`, `wo_b`, `shared_experts.w1/w2/w3`) are stored in `float8_e4m3fn` with a `uint8` `UE8M0` exponent scale per `32 × 32` tile (`scale = 2^(u8 - 127)`).
+2. **Routed-Expert `MXFP4` (`E2M1` Nibbles + `UE8M0` Block-32 Scales):**
+   Each of the `384` routed experts per backbone layer (`128` per `DSpark` layer) stores two `E2M1` 4-bit codes per `int8`/`uint8` byte (`low nibble = even column`, `high nibble = odd column`) with one `UE8M0` exponent byte per `1 × 32` input block (`K = 5120` → `160` scale blocks for `w1/w3`; `K = 2304` → `72` scale blocks for `w2`).
 
 ---
 
-## 3. Results: Persistent Megakernel vs. Batched XLA Engine (`C = 1..512`)
+## 2. Exact Per-Layer Decode Dataflow
 
-All measurements were captured on `16 × TPU v6e` (`4 × ct6e-standard-4t`) and saved in [`results/megakernel_v6e16_results.json`](results/megakernel_v6e16_results.json).
+### 2.1 Manifold-Constrained Hyper-Connections (`mHC`, `hc_mult = 4`, `20` Sinkhorn Iterations)
+The hidden state is carried across all 40 layers as 4 parallel streams $S \in \mathbb{R}^{B \times 4 \times 5120}$. Before each sublayer (`attn` or `ffn`), [`decode_megakernel.py`](megakernel/decode_megakernel.py) normalizes the flattened stream vector $S_{\text{flat}} \in \mathbb{R}^{B \times 20480}$ (`eps = 1e-20`), projects dynamic adjustments via `hc_proj` (`[20480, 24]`) scaled by `hc_scale` (`float32`), adds `hc_base` (`[6, 4]`), and splits the result into:
+- $\alpha_{\text{pre}} = \sigma(H_0) \in \mathbb{R}^{B \times 4}$ (`sigmoid`)
+- $\alpha_{\text{post}} = 2\sigma(H_1) \in \mathbb{R}^{B \times 4}$ (`2 * sigmoid`)
+- $M_0 = H_{2:6} \in \mathbb{R}^{B \times 4 \times 4}$, refined via **20 Sinkhorn-Knopp iterations** in `float32`:
+  $$A^{(0)} = \exp(M_0 - \max(M_0)), \qquad A^{(t+1)} = \text{ColNorm}\!\left(\text{RowNorm}\!\left(A^{(t)}\right)\right)$$
+The sublayer input is $x_{\text{in}} = \text{RMSNorm}\!\left(\sum_{s=0}^{3} \alpha_{\text{pre}, s} S_s\right)$, and the post-sublayer stream update is:
+$$S \leftarrow M_{20} S + \alpha_{\text{post}}^\top \odot y_{\text{sublayer}}$$
 
-![DeepSeek-V4.1-Flash Megakernel vs. Batched XLA Throughput & Latency](results/charts/megakernel-vs-batched-xla.png)
+### 2.2 `Engram` Memory Lookup at Layers `1` and `14`
+Before attention at layers `1` and `14`, the last 4 causal token IDs form 2-gram and 3-gram windows that hash into 8 prime-sized sub-tables (`total rows = 384,006,168`, `dim = 256` per head, `16` heads = `4096` total embedding dim). After gathering and dequantizing the FP8 rows on host (`engram_host`), the kernel projects Keys and Values per stream, applies RMSNorm + SiLU-gated dot-product scaling, runs a causal depthwise `conv1d` (`kernel_size = 4`) with RMSNorm + SiLU residual, and adds the result directly into the 4 `mHC` streams $S$.
 
-| Concurrency (`C`) | Baseline XLA (`tok/s` / TPOT) | Optimized Batched XLA (`tok/s` / TPOT) | Persistent Megakernel (`tok/s` / Step `ms`) | Megakernel + `DSpark` (`1+7`) (`tok/s` / Eff. TPOT) | Optimal Engine & Speedup |
-|---:|---:|---:|---:|---:|---|
-| **`1`** | `18.3 tok/s` (`54.7 ms`) | `26.8 tok/s` (`37.3 ms`) | **`175.4–218.1 tok/s`** (`5.70–4.59 ms`) | **`425.5 tok/s` (`2.35 ms/tok`)** | **Megakernel + `DSpark` (`15.9×` vs Opt. XLA, `23.3×` vs Base)** |
-| **`2`** | `36.5 tok/s` (`54.8 ms`) | `53.5 tok/s` (`37.4 ms`) | **`305.1–330.7 tok/s`** (`6.56–6.05 ms`) | **`661.2 tok/s` (`3.02 ms/tok`)** | **Megakernel + `DSpark` (`12.4×` vs Opt. XLA)** |
-| **`4`** | `72.8 tok/s` (`54.9 ms`) | `106.9 tok/s` (`37.4 ms`) | **`444.1–529.4 tok/s`** (`9.01–7.56 ms`) | **`976.6 tok/s` (`4.10 ms/tok`)** | **Megakernel + `DSpark` (`9.1×` vs Opt. XLA)** |
-| **`8`** | `145.2 tok/s` (`55.1 ms`) | `213.3 tok/s` (`37.5 ms`) | **`543.9–947.3 tok/s`** (`14.71–8.45 ms`) | **`1,210.5 tok/s` (`6.61 ms/tok`)** | **Megakernel + `DSpark` (`5.7×` vs Opt. XLA)** |
-| **`16`** | `289.2 tok/s` (`55.3 ms`) | `421.0 tok/s` (`38.0 ms`) | **`1,148.6–1,427.0 tok/s`** (`13.93–11.21 ms`) | **`1,427.0 tok/s` (`11.21 ms`)** | **Megakernel (`3.4×` vs Opt. XLA)** |
-| **`32`** | `655.0 tok/s` (`46.7 ms`) | `828.9 tok/s` (`38.6 ms`) | `1,239.8–1,563.2 tok/s` (`25.81–20.47 ms` tiled) | `1,239.8 tok/s` (VMEM-tiled `2×B16`) | **Crossover Zone (`C* ≈ 24–32`)** |
-| **`64`** | `858.3 tok/s` (`68.6 ms`) | **`1,524.5 tok/s` (`39.2 ms`)** | `1,291.5 tok/s` (`49.55 ms` tiled `4×B16`) | `1,291.5 tok/s` (`49.55 ms` tiled) | **Optimized Batched XLA (`+18.0%` vs Megakernel, `+77.6%` vs Base)** |
-| **`128`** | `2,017.6 tok/s` (`57.1 ms`) | **`2,520.7 tok/s` (`45.3 ms`)** | `1,291.5 tok/s` (`99.1 ms` tiled `8×B16`) | `1,291.5 tok/s` (`99.1 ms` tiled) | **Optimized Batched XLA (`+95.2%` vs Megakernel, `+24.9%` vs Base)** |
-| **`190–256`** | `3,164.1–3,980.0 tok/s` | **`4,046.1 tok/s` engine (`44.6 ms`)** | `1,291.5 tok/s` (`198.2 ms` tiled `16×B16`) | `1,291.5 tok/s` (`198.2 ms` tiled) | **Optimized Batched XLA (`3.1×` vs Megakernel)** |
-| **`512`** | `4,310.5–5,137.3 tok/s` | **`5,137.3 tok/s` (`77.3 ms`)** | `1,291.5 tok/s` (`396.4 ms` tiled `32×B16`) | `1,291.5 tok/s` (`396.4 ms` tiled) | **Optimized Batched XLA (`4.0×` vs Megakernel)** |
+> [!NOTE]
+> **In-Kernel vs. Host-DRAM `Engram` Execution Scope (`enable_engram`):** Inside `_megakernel_40l_body`, the Layer 1 and Layer 14 `Engram` projections, RMSNorm, SiLU gate, causal `conv1d`, and 4-stream `mHC` residual update **execute unconditionally on every step**. In Stage 1 ([`verify_reference_engine.py`](scripts/verify_reference_engine.py)) and Stage 2 Checks 1 & 2 ([`verify_pallas_megakernel.py`](scripts/verify_pallas_megakernel.py)), the full `203.1 GB` (`shards 47–48`) host-DRAM `mmap` tables are loaded (`load_engram_tables=True`, `enable_engram=True`), verifying both end-to-end golden parity (`98.24%` / `97.36%` tie-aware top-1), the `engram_table_row_L1` negative control (`max_abs_logit_diff = 36.07`), and `~10.37 ms/step` end-to-end step time including synchronous Python host-CPU `mmap` gather (`82` steps in `0.85 s` on `p6_lin_alg`). In Stage 2 Check 4, Stage 3 ([`verify_accuracy_and_tpot.py`](scripts/verify_accuracy_and_tpot.py)), and Stage 4 ([`verify_dspark_speculative.py`](scripts/verify_dspark_speculative.py)), `enable_engram=False` (`zero_eng_rows` passed into the active Layer 1 & Layer 14 in-kernel Engram blocks) is used to avoid holding `203.1 GB` of host `mmap` buffers alongside multi-bucket Pallas + `DSpark` (`mtp.0..2`) compilation and to isolate on-device TPU step time (`8.49 ms` at `C=1`, `5.57 ms` with `DSpark`, and `12/16 = 75.0%` GSM8K/STEM accuracy matching `vLLM`'s `12/16 = 75.0%` with host `Engram` enabled).
 
----
+### 2.3 Multi-Variant `CSA + SWA` Decode Attention
+- **Query & Local SWA KV:** $q_a = \text{RMSNorm}(x_{\text{in}} W_{q,a})$, $q = q_a W_{q,b} \in \mathbb{R}^{B \times 64 \times 512}$ (`448` nope + `64` Yarn RoPE). The local KV projection $kv_{\text{local}} = x_{\text{in}} W_{kv} \in \mathbb{R}^{B \times 512}$ (`448` nope + `64` Yarn RoPE) writes into the 128-slot SWA ring buffer.
+- **KV Compressor (`L2, L8, L14` at `ratio = 2`; `L20` at `ratio = 1`):**
+  - At `L2, L8, L14`, every 2 consecutive tokens `[t_even, t_odd]` in `comp_buf` (`[B, 2, 5120]`) are concatenated (`10,240` dim) and projected through `compressor.wkv_a` → RMSNorm → `compressor.wkv_b` (`[512]`), with `compress_rope_theta` applied to the 64 RoPE dims at position $p_{\text{comp}} = \lfloor t / 2 \rfloor$.
+  - Consumer layers share compressed KV from `kv_source_layer_ids = [2, 8, 14, 20]` (`L0..L1` are SWA-only).
+- **Two-Level Sparse Indexer (`L2, 8, 14, 20, 24, 28, 32, 36`):**
+  Computes 32-head `128`-dim indexer queries (`wq_b`) and keys (`wk`), scores compressed KV entries with head weights (`weights_proj` / $\sqrt{128}$), and selects up to `top-512` compressed KV entries (with `L20` also producing `candidate_topk_blocks` for `L24, 28, 32, 36`).
+- **Joint Softmax & Grouped Output Projection:**
+  Compressed KV logits and SWA logits are combined under a single numerically stable online softmax (`softmax_scale = 512^-0.5 * mscale^2`), followed by 8-group output LoRA (`wo_a` `[8, 8, 512, 128]` → `wo_b` `[8, 128, 5120]`).
 
-## 4. Key Learnings & Physical Laws
-
-### 4.1 The Coupon-Collector Law of Active Experts ($M_{\text{active}}(B)$)
-Why does dynamic expert streaming provide a `12×` HBM savings at `B = 1`, yet converge toward static grouped matmul (`gmm_v2`) around `B = 24..32`?
-
-Each `ep_y` torus row holds $E_{\text{row}} = 96$ experts and each uncorrelated token activates $k_{\text{row}} = 2$ local experts on average. By the Coupon-Collector probability law, the expected number of unique active experts per row for a batch of $B$ independent requests is:
-
-$$M_{\text{active}}(B) = 96 \times \left(1 - \left(1 - \frac{2}{96}\right)^B\right)$$
-
-- At **`B = 1`**, $M_{\text{active}}(1) = \mathbf{2.0}$ experts/row (`5.0 MB` streamed vs. `60.0 MB` static) — dynamic DMA wins by **`6.5×–8.1×`** even before speculative decoding.
-- At **`B = 8` (`DSpark` correlated vs. Multi-User uncorrelated)**:
-  - `8` tokens from **different users** activate $M_{\text{active}}(8) = \mathbf{14.69}$ experts/row (`14.71 ms/step`).
-  - `8` draft tokens from the **same sequence** (`DSpark`) share ~70% of their routed experts, activating only **`4.52` experts/row** (`8.445 ms/step`). Speculative decoding is uniquely synergistic with dynamic-DMA MoE megakernels because draft tokens amortize the exact same expert weight DMAs.
-- At **`B >= 24`**, $M_{\text{active}}(24) > 38$ experts/row, where issuing dozens of fine-grained per-expert DMAs becomes slower than Batched XLA's single contiguous `tile_m = 128` `gmm_v2` pass (`10.24 ms/step`).
-
-### 4.2 The `16.00 MB` VMEM Scratchpad Boundary
-Maintaining 4 parallel `mHC` residual streams (`[4, B, 5120]` `bfloat16` = `40 KB/token`) plus ping-pong activation and torus buffers (`40 KB/token`) consumes **`80 KB` of persistent VMEM per batch token** atop the **`6.50 MB` weight pool**.
-- Up to **`B = 16`** (`13.97 MB / 16.00 MB` VMEM), the entire batch stays resident in VMEM (`11.21 ms/step`, **`1,427.0 tok/s`**).
-- At **`B >= 32`** (`16.87 MB > 16.00 MB` hardware limit), the megakernel must tile across micro-batches of 16, whereas Batched XLA (`models/DeepSeekV4.1-Flash-v6e16/`) keeps activations in HBM and processes `B = 64..512` tokens in a single weight pass.
-
-### 4.3 Production Takeaway: Dual-Path Adaptive Dispatch
-Because both recipes use the exact same `16 × TPU v6e` (`4×4` torus) topology and 4-bit `MXFP4` weights, a production router should dispatch dynamically by active batch size:
-- **`1 <= B <= 16` (Interactive / Agentic Coding & Reasoning):** Route to the **Persistent Pallas Megakernel + `DSpark`** (`425.5 tok/s/req`, `2.35 ms` TPOT at `C=1`).
-- **`B >= 24` (High-Concurrency Batch Serving):** Route to the **Optimized Batched XLA Engine** (`1,524.5 tok/s` at `C=64`, `2,520.7 tok/s` at `C=128`, `5,137.3 tok/s` peak).
+### 2.4 Top-6 of 384 `MXFP4` Routed MoE + Shared Expert
+The router computes $g = \text{sqrtsoftplus}(x_{\text{ffn}} W_{\text{gate}})$, selects the top-6 experts using $g + b_{\text{score\_bias}}$ (`noaux_tc`), normalizes the top-6 raw scores $g$, and multiplies by `routed_scaling_factor = 1.5`. Both routed and shared experts apply SwiGLU with clamping (`swiglu_limit = 10.0` on both gate and up activations).
 
 ---
 
-## 5. Repository Layout & Reproducing the Benchmark
+## 3. Single-`pallas_call` HLO & Per-Layer Parity Verification
 
-```text
-megakernel-recipe/
-├── README.md                                 # Motivation, architecture, results, and physical laws
-├── megakernel/
-│   ├── __init__.py                           # Public entrypoints (build_dsv41_megakernel, DSparkSpeculativeEngine)
-│   ├── pool_alias.py                         # 6.50 MB VmemPoolAllocator using libtpu.reinterpret_cast
-│   ├── collectives16.py                      # 6-hop 2D torus ring collectives (make_async_remote_copy)
-│   ├── engram_prologue.py                    # Hoisted O(1) Engram hash lookup prologue (Layers 1 & 14)
-│   ├── decode_megakernel.py                  # 51-layer persistent VMEM Pallas megakernel + ETP=4 × EP=4 MoE
-│   └── dspark.py                             # DSpark (mtp.0.*) 1+7 speculative decoding engine
-├── scripts/
-│   └── benchmark_megakernel_v6e16.py         # End-to-end TPU v6e-16 verification & latency/throughput sweep
-└── results/
-    ├── charts/
-    │   └── megakernel-vs-batched-xla.png     # Dual-panel throughput & TPOT plot + hardware/config specs card
-    └── megakernel_v6e16_results.json         # Measured TPU v6e-16 latency, VMEM footprint, and DSpark results
-```
+From [`results/pallas_megakernel_report.json`](results/pallas_megakernel_report.json):
+- **Lowered HLO Inspection (`check3_single_pallas_call_hlo`):**
+  - `tpu_custom_call_count = 1` (single persistent 40-layer Pallas kernel)
+  - `all_gather_count = 1` (single post-kernel 16-way `lax.all_gather` collecting the `[8080]` per-chip LM-head vocab shard into `[129280]` logits inside `jax.shard_map`)
+  - `hlo_bytes = 6,406,704` (`6.2 MiB`)
+- **All-40-Layer Parity vs. Pure-JAX Reference Engine (`check1_per_layer_parity`, `enable_engram=True`):**
+  - **`B = 1`:** `40 / 40` layers pass (`min_cos_b1 = 0.999984`, `max_abs_diff_b1 = 0.0625`).
+  - **`B = 8`:** `40 / 40` layers pass (`min_cos_b8 = 0.999647`, `max_abs_diff_b8 = 0.1250`).
+- **End-to-End Golden Parity (`check2_end_to_end_golden`, `enable_engram=True`):**
+  - `tie_aware_prompt_top1_agreement = 97.36%` (`strict = 92.96%` vs. `94.13%` `vLLM` `C=1` vs. `C=8` batch-composition floor).
+  - `8 / 8` greedy continuations match the pure-JAX reference engine token-for-token.
 
-To run the verification and latency sweep on a `TPU v6e-16` slice:
+---
 
-```bash
-PYTHONPATH=. python3 megakernel-recipe/scripts/benchmark_megakernel_v6e16.py \
-  --output megakernel-recipe/results/megakernel_v6e16_results.json
-```
+## 4. `DSpark` (`mtp.0..2`) Group-Packed Architecture & Speculative State Machine
+
+DeepSeek-V4.1-Flash's three Multi-Token Prediction layers (`mtp.0`, `mtp.1`, `mtp.2`) operate in parallel inside a single `DSpark` draft block (`dspark_block_size = 5`, producing `4` draft tokens per step):
+1. **Target Feature Concatenation (`L37, L38, L39`):**
+   During the megakernel pass, each token captures `RMSNorm(S.mean(axis=1))` after layers `37`, `38`, and `39`, concatenated into $h_{\text{target}} \in \mathbb{R}^{15360}$.
+2. **8-Head Group-Packed `main_proj` (`5120 → 1280`):**
+   Given the anchor token embedding $\text{RMSNorm}(E(x_0))$ and $h_{\text{target}}$, each `mtp.k` layer computes:
+   $$z_k = \text{concat}(\text{RMSNorm}(E(x_k)), h_{\text{target}}) W_{\text{eh}} \in \mathbb{R}^{5120}$$
+   In `mtp.0..2`, `attn.main_proj` (`[1280, 5120]`) replaces both `wq_a` (`1280`) and `wkv` (`512`). Crucially, the checkpoint packs `wq_b` (`[36864, 1280]`) into **8 groups (`g = c // 2` for `c = 0..15`) of `160` input channels (`128` nope + `32` rope)**, where each group of 8 query heads (`4608` output dims = `2 × (4 × 512 Q) + 512 K`) expects:
+   - `q_nope_even` (`4 × 448 = 1792`) + `q_rope_even` (`4 × 64 = 256` with RoPE)
+   - `q_nope_odd` (`4 × 448 = 1792`) + `q_rope_odd` (`4 × 64 = 256` with RoPE)
+   - `k_nope` (`448`) + `k_rope` (`64` with RoPE)
+   Summing the 8 groups' `k_nope` and `k_rope` yields the shared MQA key/value `kv_t` (`512` dim) written to `dspark_kv_cache`, while `mtp.1` and `mtp.2` add a rank-256 Markov transition term (`markov_q_proj` × `markov_k_proj`) before the `o_groups = 8` output projection and top-3 of 128 `MXFP4` MoE block.
+3. **Lossless Causal Verification & Zero-Copy Pointer Rollback:**
+    Given anchor token $t_0$ and 4 draft tokens $[\hat{t}_1, \hat{t}_2, \hat{t}_3, \hat{t}_4]$, [`verify_speculative_step`](megakernel/decode_megakernel.py) runs all 5 tokens through the 40-layer Pallas megakernel in causal order, producing target greedy predictions $[t_1^*, t_2^*, t_3^*, t_4^*, t_5^*]$. If the first mismatch occurs at $j \in \{1..4\}$ ($\hat{t}_j \neq t_j^*$), the step emits $[t_1^*, \dots, t_j^*]$ (`j` tokens) and rewinds `swa_pos`, `comp_buf_len`, and `comp_num_entries` to their state after token $j-1$ (`O(1)` scalar rollback). If all 4 draft tokens match, all 5 tokens $[t_1^*, t_2^*, t_3^*, t_4^*, t_5^*]$ are emitted.
