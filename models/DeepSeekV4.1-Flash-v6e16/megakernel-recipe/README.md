@@ -3,9 +3,9 @@
 This directory contains a complete, checkpoint-verified **40-layer Pallas Decode Megakernel + `200.5 GB` Host-Mapped `Engram` + `DSpark` (`mtp.0..2`) Speculative Decoding** engine for **DeepSeek-V4.1-Flash** (`gs://dsv4-flash-jawadamin-asia-ne1/deepseek-v4.1-flash`) on a 16-chip **TPU v6e** (`4×4` 2D mesh across 4 hosts of 4 chips) slice.
 
 While the batched XLA recipes in [`../kernel-optimizations-recipe/`](../kernel-optimizations-recipe/README.md) and [`../fused-kernels-recipe/`](../fused-kernels-recipe/README.md) optimize `vLLM` + `tpu-inference` for high-concurrency throughput (`C = 64..512`), this megakernel recipe targets **low-latency interactive decoding (`C = 1..16`)** with **100% of architectural components active (`enable_engram=True`)**:
-- **Single-Stream (`C = 1`) Non-Speculative Decode (`enable_engram=True`):** Reduces Time Per Output Token (TPOT) at `1,024`-token context from **`44.78 ms` (`22.3 tok/s`) in production `vLLM` down to `9.30 ms` (`107.6 tok/s`, a `4.82×` speedup; `9.16 ms` in the `1K/4K` grid)** by executing all 40 decoder layers, in-kernel `Engram` cross-attention (`L1`, `L14`), `DSpark` target hidden-state capture (`L37..L39`), final RMSNorm, and the `129,280`-vocab LM head inside **a single `pallas_call` (`tpu_custom_call == 1` in lowered HLO)** paired with a vectorized `160.8 µs` host-RAM `/dev/shm` `Engram` gather (`fast_gather_both_chips`).
+- **Single-Stream (`C = 1`) Non-Speculative Decode (`enable_engram=True`):** Reduces Time Per Output Token (TPOT) at `1,024`-token context from **`44.78 ms` (`22.3 tok/s`) in production `vLLM` down to `9.18 ms` (`108.9 tok/s`, a `4.88×` speedup; `9.16 ms` in the `1K/4K` grid)** by executing all 40 decoder layers, in-kernel `Engram` cross-attention (`L1`, `L14`), `DSpark` target hidden-state capture (`L37..L39`), final RMSNorm, and the `129,280`-vocab LM head inside **a single `pallas_call` (`tpu_custom_call == 1` in lowered HLO)** paired with a vectorized `160.8 µs` host-RAM `/dev/shm` `Engram` gather (`fast_gather_both_chips`).
 - **Single-Stream (`C = 1`) Lossless `DSpark` (`mtp.0..2`) Speculative Decode (`enable_engram=True`):** Uses the checkpoint's three native Multi-Token Prediction layers (`mtp.0`, `mtp.1`, `mtp.2`, `128` routed experts top-3) to propose **4 draft tokens (`1 anchor + 4 draft = 5` tokens verified per megakernel pass)** with live 4-gram `Engram` lookups on every candidate token. Across 8 golden prompts (`2,048 / 2,048` greedy tokens = **`100.0%` lossless token identity**), `DSpark` accepts a mean of **`3.15 tokens/step`** (`+2.15` draft tokens accepted per step, `53.7%` per-draft-token acceptance rate, up to **`4.92 tokens/step`**), lowering median effective TPOT to **`7.27 ms/token` (`137.5 tok/s`, `1.41×` faster than non-speculative megakernel and `6.16×` faster than production `vLLM`)**, and reaching **`4.36 ms/token` (`229.5 tok/s`, `2.34×` speculative speedup / `10.28×` vs. `vLLM`)** on factual and structured reasoning prompts.
-- **End-to-End Numerical & Benchmark Parity (`enable_engram=True`):** Matches production `vLLM` (`tpu-inference`) on the real 475 GiB GCS checkpoint with **`98.24%` tie-aware (`93.26%` strict) prompt-logprob top-1 agreement** (exceeding the `94.13%` `vLLM` `C=1` vs. `C=8` batch-composition noise floor), **`min_cos = 0.999984` (`B=1`) / `0.999647` (`B=8`)** across all 40 layers (`including L1 and L14 Engram`), and **`100.0%` (`16/16`) GSM8K/STEM accuracy** with `enable_engram=True` (vs. `75.0%` (`12/16`) on `vLLM` raw completion).
+- **End-to-End Numerical & Benchmark Parity (`enable_engram=True`):** Matches production `vLLM` (`tpu-inference`) on the real 475 GiB GCS checkpoint with **`98.24%` tie-aware (`93.26%` strict) prompt-logprob top-1 agreement** (exceeding the `94.13%` `vLLM` `C=1` vs. `C=8` batch-composition noise floor), **`min_cos = 0.999984` (`B=1`) / `0.999647` (`B=8`)** across all 40 layers (`including L1 and L14 Engram`), and **`100.0%` (`16/16`) GSM8K/STEM first-turn accuracy** with `enable_engram=True` (**`16/16` exact answer agreement** with `vLLM` first-turn extraction; `12/16 = 75.0%` on `vLLM` raw 256-token tail extraction without stop tokens).
 
 ---
 
@@ -47,7 +47,7 @@ flowchart LR
         VMEM["On-Chip VMEM Scratchpad (128 MiB v6e)\n4-Stream mHC Residuals [4, B, 5120]\n20-Iter Sinkhorn-Knopp + L1/L14 Engram"]
         ATTN["CSA + SWA Decode Attention\nRatio 2 (L2,8,14) & Ratio 1 (L20) Compressor\nTwo-Level Top-512 Indexer + 128-Win SWA"]
         MOE["In-Kernel Top-6/384 MXFP4 MoE\n24 Local Experts/Chip in 3x8 VMEM Groups\n+ 2D Mesh Pallas All-Reduce"]
-        HEAD["L37..L39 DSpark Target Capture\n+ Final RMSNorm + 16-Way LM Head\n(9.30 ms/step @ C=1 w/ Engram)"]
+        HEAD["L37..L39 DSpark Target Capture\n+ Final RMSNorm + 16-Way LM Head\n(9.18 ms/step @ C=1 w/ Engram)"]
         VMEM --> ATTN --> MOE --> HEAD
     end
 
@@ -86,11 +86,11 @@ All results below are measured on the live `TPU v6e-16` (`4×4`) slice against t
 
 | Active Concurrency (`C`) | Production `vLLM` TPOT (`ms` / `tok/s`) | 40-Layer Pallas Megakernel + `200.5 GB` `Engram` TPOT (`ms` / `tok/s`) | Megakernel + `Engram` + `DSpark` (`mtp.0..2`) TPOT (`ms` / `tok/s`) | Speedup vs. Production `vLLM` |
 |---:|---:|---:|---:|---|
-| **`1`** | `44.78 ms` (`22.3 tok/s`) | **`9.30 ms`** (`107.6 tok/s`; `9.16 ms` in `1K/4K` grid) | **`7.27 ms` med / `4.36 ms` best** (`137.5–229.5 tok/s`) | **`4.82×` non-spec / `6.16×` med (`10.28×` peak) with `DSpark`** |
-| **`2`** | `45.73 ms` (`43.7 tok/s`) | **`11.11 ms`** (`180.0 tok/s`) | — | **`4.11×` faster than `vLLM`** |
-| **`4`** | `37.19 ms` (`107.5 tok/s`) | **`14.53 ms`** (`275.2 tok/s`) | — | **`2.56×` faster than `vLLM`** |
-| **`8`** | `39.59 ms` (`198.6 tok/s`) | **`20.69 ms`** (`386.6 tok/s`) | — | **`1.91×` faster than `vLLM`** |
-| **`16`** | `42.62 ms` (`370.0 tok/s`) | **`40.74 ms`** (`392.8 tok/s`) | — | **`1.05×` faster than `vLLM` (Crossover `> 16`)** |
+| **`1`** | `44.78 ms` (`22.3 tok/s`) | **`9.18 ms`** (`108.9 tok/s`; `9.16 ms` in `1K/4K` grid) | **`7.27 ms` med / `4.36 ms` best** (`137.5–229.5 tok/s`) | **`4.88×` non-spec / `6.16×` med (`10.28×` peak) with `DSpark`** |
+| **`2`** | `45.73 ms` (`43.7 tok/s`) | **`11.05 ms`** (`181.0 tok/s`) | — | **`4.14×` faster than `vLLM`** |
+| **`4`** | `37.19 ms` (`107.5 tok/s`) | **`14.47 ms`** (`276.4 tok/s`) | — | **`2.57×` faster than `vLLM`** |
+| **`8`** | `39.59 ms` (`198.6 tok/s`) | **`20.64 ms`** (`387.6 tok/s`) | — | **`1.92×` faster than `vLLM`** |
+| **`16`** | `42.62 ms` (`370.0 tok/s`) | **`40.68 ms`** (`393.3 tok/s`) | — | **`1.05×` faster than `vLLM` (Crossover `> 16`)** |
 
 Additionally, in the `1K` vs. `4K` context-length grid with live `enable_engram=True` ([`results/pallas_megakernel_report.json`](results/pallas_megakernel_report.json), `60` timed iterations after `10` warmup iterations):
 - **`1,024` Context (`enable_engram=True`):** `B = 1` median **`9.16 ms`** (`p10 = 9.08 ms`, `p90 = 9.25 ms`, `min = 9.00 ms`); `B = 8` (shared prefix) median **`16.83 ms`** (`p10 = 16.22 ms`, `p90 = 17.34 ms`).
@@ -121,7 +121,7 @@ From [`results/dspark_speculative_report.json`](results/dspark_speculative_repor
 | **Negative Controls** | Single-component weight perturbations (`routed_expert_w1_L0`, `compressor_wkv_L2`, `indexer_weights_proj_L2`, `mhc_attn_base_L0`, `engram_table_row_L1`) | **`5 / 5` fail parity as required** (`max_abs_logit_diff = 8.38 .. 36.07`) | Must diverge when any component is perturbed | **PASS** |
 | **40-Layer Pallas Parity** | Per-layer output cosine similarity across all `40` layers (`L0..L39`, including `L1` & `L14` `Engram`) vs. JAX reference engine | **`B=1`: `min_cos = 0.999984` (`40/40`)**<br>**`B=8`: `min_cos = 0.999647` (`40/40`)** | Within two-XLA-config `bf16` floor (`>= 0.999`) | **PASS** |
 | **Single-Call HLO Check** | Count of `custom_call_target="tpu_custom_call"` in lowered 40-layer step HLO | **`1` (`all_gather_count = 1`, `hlo_bytes = 6,406,704`)** | Exactly `1` `pallas_call` for all 40 layers + LM head | **PASS** |
-| **Benchmark Accuracy** | 16-question GSM8K / STEM reasoning benchmark (`256` greedy tokens per question, `enable_engram=True`) | **`16 / 16` (`100.0%`)** | Production `vLLM` baseline: **`12 / 16` (`75.0%`)** | **PASS** |
+| **Benchmark Accuracy** | 16-question GSM8K / STEM reasoning verification suite (`256` greedy tokens per question, `enable_engram=True`; full `n=198` GPQA Diamond in [`../kernel-optimizations-recipe/`](../kernel-optimizations-recipe/README.md)) | **`16 / 16` (`100.0%`)** | Production `vLLM`: **`16 / 16` (`100.0%` first-turn)** / `12 / 16` (`75.0%` raw tail) | **PASS** |
 
 ---
 

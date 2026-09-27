@@ -63,13 +63,18 @@ def run_accuracy_benchmark(
 
     mk_items: List[Dict[str, Any]] = []
     mk_correct = 0
+    vllm_first_turn_correct = 0
     exact_pred_matches_vs_vllm = 0
+    exact_first_turn_matches_vs_vllm = 0
 
     for idx_q, v_item in enumerate(vllm_items):
         qid = v_item["id"]
         prompt_str = v_item["prompt"]
         expected = str(v_item["expected_answer"])
         vllm_pred = str(v_item["predicted_answer"])
+        vllm_first_turn_pred = extract_answer(str(v_item.get("text", "")))
+        vllm_ft_ok = vllm_first_turn_pred == expected
+        vllm_first_turn_correct += int(vllm_ft_ok)
 
         prompt_ids = np.array(
             tok.encode(prompt_str, add_special_tokens=False), dtype=np.int32
@@ -86,6 +91,8 @@ def run_accuracy_benchmark(
         mk_correct += int(is_correct)
         if pred == vllm_pred:
             exact_pred_matches_vs_vllm += 1
+        if pred == vllm_first_turn_pred:
+            exact_first_turn_matches_vs_vllm += 1
 
         entry = {
             "id": qid,
@@ -93,21 +100,26 @@ def run_accuracy_benchmark(
             "expected_answer": expected,
             "mk_predicted_answer": pred,
             "vllm_predicted_answer": vllm_pred,
+            "vllm_first_turn_predicted_answer": vllm_first_turn_pred,
             "mk_correct": bool(is_correct),
             "vllm_correct": bool(v_item["correct"]),
+            "vllm_first_turn_correct": bool(vllm_ft_ok),
             "elapsed_s": round(float(elapsed), 2),
             "text_preview": text[:240],
+            "text": text,
         }
         mk_items.append(entry)
         if rank == 0:
             print(
-                f"[Stage 3 Acc] {qid}: expected={expected} mk_pred={pred} (vllm={vllm_pred}) "
+                f"[Stage 3 Acc] {qid}: expected={expected} mk_pred={pred} "
+                f"(vllm_first_turn={vllm_first_turn_pred}, vllm_raw={vllm_pred}) "
                 f"ok={is_correct} ({elapsed:.2f}s)",
                 flush=True,
             )
 
     num_q = len(vllm_items)
     mk_acc = float(mk_correct / max(1, num_q))
+    vllm_ft_acc = float(vllm_first_turn_correct / max(1, num_q))
     check1_pass = mk_correct >= (vllm_correct - 1)
     return {
         "pass": bool(check1_pass),
@@ -117,8 +129,13 @@ def run_accuracy_benchmark(
         "mk_accuracy": mk_acc,
         "vllm_num_correct": int(vllm_correct),
         "vllm_accuracy": vllm_acc,
+        "vllm_first_turn_num_correct": int(vllm_first_turn_correct),
+        "vllm_first_turn_accuracy": vllm_ft_acc,
         "exact_answer_agreement_vs_vllm": float(
             exact_pred_matches_vs_vllm / max(1, num_q)
+        ),
+        "exact_first_turn_agreement_vs_vllm": float(
+            exact_first_turn_matches_vs_vllm / max(1, num_q)
         ),
         "items": mk_items,
     }

@@ -170,7 +170,7 @@ This **3-instruction bitwise sequence** is **bit-for-bit identical (`max_abs_dif
 | Concurrency (`C`) | Baseline Output `tok/s` | Optimized Output `tok/s` | Throughput Gain | Baseline TPOT (`ms`) | Optimized TPOT (`ms`) | TPOT Reduction |
 |---:|---:|---:|---:|---:|---:|---:|
 | **`1`** | `18.3 tok/s` | **`22.3 tok/s`** *(137.5–229.5 w/ [Megakernel + DSpark](../../megakernel-recipe/README.md))* | **`+21.9%`** *(6.16×–10.28× w/ Megakernel)* | `54.6 ms` | **`44.78 ms`** *(7.27 / 4.36 ms)* | **`-18.0%`** |
-| **`16`** | `361.2 tok/s` | **`375.4 tok/s`** *(392.8 w/ [Megakernel](../../megakernel-recipe/README.md))* | **`+3.9%`** *(1.05× w/ Megakernel)* | `44.3 ms` | **`42.62 ms`** *(40.74 ms)* | **`-3.8%`** |
+| **`16`** | `361.2 tok/s` | **`375.4 tok/s`** *(393.3 w/ [Megakernel](../../megakernel-recipe/README.md))* | **`+3.9%`** *(1.05× w/ Megakernel)* | `44.3 ms` | **`42.62 ms`** *(40.68 ms)* | **`-3.8%`** |
 | **`32`** | `655.0 tok/s` | **`828.9 tok/s`** | **`+26.5%`** | `46.7 ms` | **`38.6 ms`** | **`-17.3%`** |
 | **`64`** | `858.3 tok/s` | **`1,524.2 tok/s`** | **`+77.6%`** | `68.6 ms` | **`39.2 ms`** | **`-42.9%`** |
 | **`128`** | `2,017.6 tok/s` | **`2,521.0 tok/s`** | **`+24.9%`** | `57.1 ms` | **`45.5 ms`** | **`-20.3%`** |
@@ -183,7 +183,7 @@ All optimizations preserve **100% greedy determinism (`16/16` byte-for-bit ident
 
 ## 6. Dual-Regime Envelope: Batched XLA (`C > 16`) vs. 40-Layer Pallas Decode Megakernel (`C = 1..16`)
 
-At low concurrency (`C = 1..16`), per-kernel XLA dispatch barriers and static `gmm_v2` weight streaming become the dominant bottleneck. Our companion **[`megakernel-recipe/`](../../megakernel-recipe/README.md)** wraps all 40 layers (including live 200.5 GB Engram host-RAM lookups and `pallas_engram_sublayer` cross-attention at `layers.1` and `layers.14`, `enable_engram=True`) into a single Pallas decode megakernel (`1` `tpu_custom_call` per step) paired with `DSpark` (`mtp.0..2` lossless `1+4` speculative decoding, `3.15 tok/step` mean / `4.92 tok/step` peak acceptance), reaching **`137.5 tok/s` median (`7.27 ms` TPOT, `6.16×` faster) and up to `229.5 tok/s` (`4.36 ms` TPOT, `10.28×` faster) at `C=1`** (`107.6 tok/s` / `9.30 ms` non-speculative):
+At low concurrency (`C = 1..16`), per-kernel XLA dispatch barriers and static `gmm_v2` weight streaming become the dominant bottleneck. Our companion **[`megakernel-recipe/`](../../megakernel-recipe/README.md)** wraps all 40 layers (including live 200.5 GB Engram host-RAM lookups and `pallas_engram_sublayer` cross-attention at `layers.1` and `layers.14`, `enable_engram=True`) into a single Pallas decode megakernel (`1` `tpu_custom_call` per step) paired with `DSpark` (`mtp.0..2` lossless `1+4` speculative decoding, `3.15 tok/step` mean / `4.92 tok/step` peak acceptance), reaching **`137.5 tok/s` median (`7.27 ms` TPOT, `6.16×` faster) and up to `229.5 tok/s` (`4.36 ms` TPOT, `10.28×` faster) at `C=1`** (`108.9 tok/s` / `9.18 ms` non-speculative):
 
 ![DeepSeek-V4.1-Flash Megakernel vs. Fused Kernel vs. Base XLA Throughput & Latency](../../megakernel-recipe/results/charts/megakernel-vs-fused-vs-base-xla.png)
 

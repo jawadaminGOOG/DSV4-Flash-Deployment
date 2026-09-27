@@ -75,9 +75,9 @@ From [`results/pallas_megakernel_report.json`](results/pallas_megakernel_report.
   - **`B = 1`:** `40 / 40` layers pass (`min_cos_b1 = 0.999984`, `max_abs_diff_b1 = 1.0` at Layer 39 matching the `2.0` two-XLA-config BF16 floor; Layer 1 `Engram` `cos = 0.999999`, Layer 14 `Engram` `cos = 1.000000`).
   - **`B = 8`:** `40 / 40` layers pass (`min_cos_b8 = 0.999647`, `max_abs_diff_b8 = 2.0` at Layer 39 matching the `2.0` two-XLA-config BF16 floor; Layer 1 `Engram` `cos = 0.999992`, Layer 14 `Engram` `cos = 0.999998`).
 - **Live `enable_engram=True` Step Latency (`check4_decode_step_latency` & Stage 3 Concurrency Sweep):**
-  - **`1,024` Context:** `B = 1` median **`9.16 ms`** (`9.30 ms` / `107.6 tok/s` in the Stage 3 concurrency ladder, `4.82×` faster than `vLLM`'s `44.78 ms`); `B = 8` median **`16.83 ms`** (`20.69 ms` / `386.6 tok/s` with distinct request positions in Stage 3).
+  - **`1,024` Context:** `B = 1` median **`9.16 ms`** (`9.18 ms` / `108.9 tok/s` in the Stage 3 concurrency ladder, `4.88×` faster than `vLLM`'s `44.78 ms`); `B = 8` median **`16.83 ms`** (`20.64 ms` / `387.6 tok/s` with distinct request positions in Stage 3).
   - **`4,096` Context:** `B = 1` median **`10.25 ms`**; `B = 8` median **`17.79 ms`**.
-  - **16-Question GSM8K/STEM Accuracy (`enable_engram=True`):** **`16 / 16` (`100.0%`)** vs. `12 / 16` (`75.0%`) on `vLLM` raw completion.
+  - **16-Question GSM8K/STEM Verification Suite (`enable_engram=True`):** **`16 / 16` (`100.0%`)** matching `vLLM`'s **`16 / 16` (`100.0%`)** on first-turn answer extraction (`12 / 16 = 75.0%` on raw 256-token tail extraction without stop tokens).
 
 ---
 

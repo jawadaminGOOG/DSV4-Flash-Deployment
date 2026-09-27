@@ -135,10 +135,17 @@ def generate_three_recipe_chart(repo_root: Path) -> None:
     fused_tpot = [34.50, 38.50, 37.60, 37.80, 42.90]
 
     # 4. 40-Layer Pallas Decode Megakernel with live 200.5 GB Engram (`enable_engram=True`, C=1..16)
+    results_path = (
+        repo_root
+        / "models/DeepSeekV4.1-Flash-v6e16/megakernel-recipe/results/megakernel_v6e16_results.json"
+    )
+    mk_data = json.loads(results_path.read_text())
+    mk_ladder = mk_data["accuracy_and_tpot_validation"]["concurrency_ladder_1k_context"]
     mk_indices = [0, 1, 2, 3, 4]
-    mk_toks = [107.6, 180.0, 275.2, 386.6, 392.8]
-    mk_tpot = [9.30, 11.11, 14.53, 20.69, 40.74]
-    mk_speedups = ["4.82x", "4.11x", "2.56x", "1.91x", "1.05x"]
+    mk_concs = [1, 2, 4, 8, 16]
+    mk_toks = [float(mk_ladder[f"C={c}"]["mk_decode_tok_per_s"]) for c in mk_concs]
+    mk_tpot = [float(mk_ladder[f"C={c}"]["mk_median_tpot_ms"]) for c in mk_concs]
+    mk_speedups = [f"{float(mk_ladder[f'C={c}']['speedup_vs_vllm']):.2f}x" for c in mk_concs]
 
     # 5. Pallas Megakernel + DSpark (`enable_engram=True`, mtp.0..2 lossless 1+4 speculative at C=1)
     dspark_med_toks = 137.5
@@ -335,7 +342,7 @@ def generate_three_recipe_chart(repo_root: Path) -> None:
     draw_centered_badge(
         draw,
         [p2_l + 16, p2_t + 14, x_split_2 - 12, p2_t + 62],
-        "Sub-21 ms Interactive Regime: 4.36–9.30 ms @ C=1",
+        f"Sub-21 ms Interactive Regime: 4.36–{mk_tpot[0]:.2f} ms @ C=1",
         f_badge,
         (14, 165, 233, 38),
         (14, 165, 233, 180),
@@ -426,7 +433,7 @@ def generate_three_recipe_chart(repo_root: Path) -> None:
 
     items = [
         (col_dspark, "diamond", "40L Pallas Megakernel + Engram + DSpark (mtp.0..2 Speculative): 7.27 ms med (137.5 tok/s) / 4.36 ms best (229.5 tok/s) @ C=1"),
-        (col_mk, "solid", "40L Pallas Decode Megakernel + 200.5 GB Engram (1 tpu_custom_call): 9.30 ms (107.6 tok/s) @ C=1 .. 40.74 ms (392.8 tok/s) @ C=16"),
+        (col_mk, "solid", f"40L Pallas Decode Megakernel + 200.5 GB Engram (1 tpu_custom_call): {mk_tpot[0]:.2f} ms ({mk_toks[0]:.1f} tok/s) @ C=1 .. {mk_tpot[4]:.2f} ms ({mk_toks[4]:.1f} tok/s) @ C=16"),
         (col_fused, "solid", "Fused W13+SiLU+W2 MoE + Hybrid EP=8×TP=2 (623b2904): 32.72 ms/step, 1,740 tok/s @ C=64 .. 4,758.5 tok/s @ C=190 (+19.2%)"),
         (col_base, "solid", "Base Batched XLA (Two-Pass EP=16 XProf Optimized, 4b8edd8e): 39.18 ms/step, 22.3 tok/s @ C=1 .. 3,992.6 tok/s @ C=190"),
         (col_unopt, "dashed", "Unoptimized Batched XLA Baseline (d85ce9c1): 61.71 ms/step, 18.3 tok/s @ C=1 .. 3,164.1 tok/s @ C=190"),
@@ -570,9 +577,11 @@ def generate_megakernel_detail_chart(repo_root: Path) -> None:
 
     # Legend Box Panel 1
     draw.rectangle([p1_l + 35, p1_t + 25, p1_l + 960, p1_t + 190], fill=(15, 23, 42, 235), outline=(71, 85, 105, 255), width=2)
+    c1_m_ms = float(ladder["C=1"]["mk_median_tpot_ms"])
+    c1_sp = float(ladder["C=1"]["speedup_vs_vllm"])
     leg1 = [
         (col_vllm, "Production vLLM Batched XLA (FP8 KV + MXFP4, tpu-inference)"),
-        (col_mk, "40-Layer Pallas Decode Megakernel + 200.5 GB Engram (9.30 ms @ C=1, 4.82x)"),
+        (col_mk, f"40-Layer Pallas Decode Megakernel + 200.5 GB Engram ({c1_m_ms:.2f} ms @ C=1, {c1_sp:.2f}x)"),
         (col_dsp, "C=1 Megakernel + Engram + DSpark (mtp.0..2): 7.27 ms med / 4.36 ms best (10.28x)"),
     ]
     for li, (col, txt) in enumerate(leg1):

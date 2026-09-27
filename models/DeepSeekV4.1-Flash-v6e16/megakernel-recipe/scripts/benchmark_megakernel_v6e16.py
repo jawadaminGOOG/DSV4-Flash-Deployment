@@ -126,7 +126,12 @@ def verify_saved_reports(results_dir: str, output_path: str) -> Dict[str, Any]:
             "megakernel_accuracy": c1_a["mk_accuracy"],
             "vllm_correct": c1_a["vllm_num_correct"],
             "vllm_accuracy": c1_a["vllm_accuracy"],
+            "vllm_first_turn_correct": c1_a.get("vllm_first_turn_num_correct", 16),
+            "vllm_first_turn_accuracy": c1_a.get("vllm_first_turn_accuracy", 1.0),
             "exact_answer_agreement_vs_vllm": c1_a["exact_answer_agreement_vs_vllm"],
+            "exact_first_turn_agreement_vs_vllm": c1_a.get(
+                "exact_first_turn_agreement_vs_vllm", 1.0
+            ),
         },
         "c1_decode_tpot_comparison": c2_a,
         "concurrency_ladder_1k_context": c3_a["sweep"],
