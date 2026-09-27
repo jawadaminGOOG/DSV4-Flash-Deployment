@@ -722,7 +722,7 @@ def verify_check4_latency(
 
     for context_len in [1024, 4096]:
         max_comp = context_len
-        state = mk.init_decode_state(max_comp=max_comp, enable_engram=False)
+        state = mk.init_decode_state(max_comp=max_comp, enable_engram=True)
         swa_pos_np = np.broadcast_to(
             (context_len - 128 + np.arange(128, dtype=np.int32))[None, :],
             (b_tile, 128),
@@ -736,30 +736,36 @@ def verify_check4_latency(
             tids_np = np.zeros((b_tile,), dtype=np.int32)
             tids_np[:active_b] = 100 + np.arange(active_b, dtype=np.int32)
             res_in = mk._embed_4stream(mk.weights.embed_weight, mk.replicate(tids_np))
+            wins_base = np.array(
+                [[100 + r + s * 17 for s in range(4)] for r in range(active_b)],
+                dtype=np.int64,
+            )
 
             # Use active_b=1 for (1024, B=1) cache hit, and active_b=0 (dynamic from pos_vmem) otherwise
             kernel_active_b = 1 if (context_len == 1024 and active_b == 1) else 0
 
             t_compile0 = time.perf_counter()
-            for _ in range(num_warmup):
+            for w_it in range(num_warmup):
+                eng_rows_tp = mk._gather_engram_rows_tp(wins_base + w_it, active_b=active_b)
                 _, top1_ids, _, state = mk.run_raw_step(
                     active_b=kernel_active_b,
                     res_in=res_in,
                     pos_vmem=pos_vmem,
-                    eng_rows_tp=mk.zero_eng_rows,
+                    eng_rows_tp=eng_rows_tp,
                     state=state,
                 )
                 top1_ids.block_until_ready()
             warmup_s = time.perf_counter() - t_compile0
 
             times_ms: List[float] = []
-            for _ in range(num_timed):
+            for t_it in range(num_timed):
                 t0 = time.perf_counter()
+                eng_rows_tp = mk._gather_engram_rows_tp(wins_base + t_it, active_b=active_b)
                 _, top1_ids, _, state = mk.run_raw_step(
                     active_b=kernel_active_b,
                     res_in=res_in,
                     pos_vmem=pos_vmem,
-                    eng_rows_tp=mk.zero_eng_rows,
+                    eng_rows_tp=eng_rows_tp,
                     state=state,
                 )
                 top1_ids.block_until_ready()
@@ -803,6 +809,11 @@ def main():
     parser.add_argument("--golden-json", default="/tmp/vllm_golden.json")
     parser.add_argument("--output-json", default="/tmp/pallas_megakernel_report.json")
     parser.add_argument("--hlo-out", default="/tmp/pallas_megakernel_40layer.hlo")
+    parser.add_argument(
+        "--update-check4-in-place",
+        action="store_true",
+        help="Re-run Check 4 latency with live Engram and update existing report JSON in place",
+    )
     args = parser.parse_args()
 
     jax.distributed.initialize()
@@ -821,6 +832,36 @@ def main():
             f"Loaded 40-layer ModelWeights in {time.perf_counter() - t_start:.2f}s",
             flush=True,
         )
+
+    if args.update_check4_in_place and os.path.exists(args.output_json):
+        with open(args.output_json, "r") as f:
+            existing_report = json.load(f)
+        t_pack = time.perf_counter()
+        pmw = pack_megakernel_weights(mw, batch_tile=8, free_source_layers=True)
+        del mw
+        gc.collect()
+        mk = DSV41PallasMegakernel(pmw, batch_tile=8)
+        if rank == 0:
+            print(
+                f"Packed 40-layer PallasMegakernelWeights in {time.perf_counter() - t_pack:.2f}s",
+                flush=True,
+            )
+        c4_report = verify_check4_latency(mk, num_warmup=10, num_timed=60)
+        existing_report["check4_decode_step_latency"] = c4_report
+        existing_report["overall_pass"] = bool(
+            existing_report["check1_per_layer_parity"]["pass"]
+            and existing_report["check2_end_to_end_golden"]["pass"]
+            and existing_report["check3_single_pallas_call_hlo"]["pass"]
+            and c4_report["pass"]
+        )
+        if rank == 0:
+            with open(args.output_json, "w") as f:
+                json.dump(existing_report, f, indent=2)
+            print(
+                f"\n=== UPDATED CHECK 4 IN {args.output_json} (OVERALL_PASS={existing_report['overall_pass']}) ===",
+                flush=True,
+            )
+        return
 
     # Check 1: All 40 layers at B in {1, 8} vs JAX reference engine within 2-XLA-config floor
     c1_report = verify_check1_all_40_layers(mw, tok, golden_data)

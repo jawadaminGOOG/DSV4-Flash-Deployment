@@ -261,6 +261,16 @@ class EngramHostTables:
 
         self.weight_mmaps: Dict[int, np.ndarray] = {}
         self.scale_mmaps: Dict[int, np.ndarray] = {}
+        self._fp8_lut = (
+            np.arange(256, dtype=np.uint8)
+            .view(ml_dtypes.float8_e4m3fn)
+            .astype(np.float32)
+        )
+        self._local_primes = self.flat_primes[:, self.col_start : self.col_end].copy()
+        self._local_offsets = (
+            self.flat_offsets[:, self.col_start : self.col_end]
+            - np.array(self.vocab_start, dtype=np.int64)[:, None]
+        ).copy()
 
     def compute_hashes_for_windows(self, windows_4: np.ndarray) -> np.ndarray:
         """Compute [T, 2, 24] int64 hash IDs from [T, 4] token windows [tok_t, tok_{t-1}, tok_{t-2}, tok_{t-3}].
@@ -302,12 +312,47 @@ class EngramHostTables:
         cols = h_layer[:, self.col_start : self.col_end] - self.vocab_start[layer_hash_index]
         w_u8 = self.weight_mmaps[layer_hash_index][cols]  # [T, 6, 256] uint8
         s_u8 = self.scale_mmaps[layer_hash_index][cols]   # [T, 6, 8] uint8
-        w_f8 = w_u8.view(ml_dtypes.float8_e4m3fn).astype(np.float32)
+        w_f8 = self._fp8_lut[w_u8]
         s_f32 = (s_u8.astype(np.uint32) << np.uint32(23)).view(np.float32)
         vals = (w_f8.reshape(-1, self.cols_per_host, 8, 32) * s_f32[..., None]).reshape(
             -1, self.cols_per_host, 256
         )
-        return vals.astype(ml_dtypes.bfloat16)
+        u32 = vals.view(np.uint32)
+        return ((u32 + 0x7FFF + ((u32 >> 16) & 1)) >> 16).astype(np.uint16).view(ml_dtypes.bfloat16)
+
+    def fast_gather_both_chips(self, windows_4: np.ndarray, b_tile: int = 8) -> np.ndarray:
+        """Vectorized local 6-column hash + mmap gather + FP8->BF16 dequant for both L1 and L14 (~170 us).
+
+        Args:
+            windows_4: [T, 4] int64 token windows (`T <= b_tile`).
+            b_tile: Pallas megakernel batch tile (`8`).
+        Returns:
+            chips_bf16: [4, 1, 2, b_tile, 384] bfloat16 numpy array ready for per-chip `device_put`.
+        """
+        t_count = windows_4.shape[0]
+        blocked = np.maximum.accumulate(windows_4 < 0, axis=1)
+        safe_tok = np.clip(windows_4, 0, len(self.token_map) - 1)
+        mapped = np.where(blocked, self.pad_id, self.token_map[safe_tok])
+        terms = mapped[:, None, :] * self.multipliers[None, :, :]
+        r0 = terms[:, :, 0]
+        r1 = r0 ^ terms[:, :, 1]
+        r2 = r1 ^ terms[:, :, 2]
+        r3 = r2 ^ terms[:, :, 3]
+        rolls = np.stack([r1, r2, r3], axis=2)
+        roll_6 = np.repeat(rolls, 8, axis=2)[:, :, self.col_start : self.col_end]
+        cols = (roll_6 % self._local_primes[None, :, :]) + self._local_offsets[None, :, :]
+
+        out = np.zeros((4, 1, 2, b_tile, 384), dtype=ml_dtypes.bfloat16)
+        for idx_e in range(2):
+            if idx_e in self.weight_mmaps:
+                c_e = cols[:, idx_e, :]
+                wf = self._fp8_lut[self.weight_mmaps[idx_e][c_e]]
+                sf = (self.scale_mmaps[idx_e][c_e].astype(np.uint32) << np.uint32(23)).view(np.float32)
+                v32 = (wf.reshape(t_count, 6, 8, 32) * sf[..., None]).reshape(t_count, 4, 384)
+                u32 = v32.view(np.uint32)
+                v_bf16 = ((u32 + 0x7FFF + ((u32 >> 16) & 1)) >> 16).astype(np.uint16).view(ml_dtypes.bfloat16)
+                out[:, 0, idx_e, :t_count, :] = np.transpose(v_bf16, (1, 0, 2))
+        return out
 
 
 @dataclass

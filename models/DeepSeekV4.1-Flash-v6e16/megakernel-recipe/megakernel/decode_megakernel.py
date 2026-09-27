@@ -2856,22 +2856,13 @@ class DSV41PallasMegakernel:
     def _gather_engram_rows_tp(self, windows_np: np.ndarray, active_b: int) -> jax.Array:
         """Gather local Engram rows for Layers 1 and 14 (`[16, 2, B_tile, 384]` bf16)."""
         b_tile = self.batch_tile
-        hashes = self.weights.engram_host.compute_hashes_for_windows(windows_np)
-        both = np.zeros((2, b_tile, 1536), dtype=ml_dtypes.bfloat16)
-        for idx_e in range(2):
-            if idx_e in self.weights.engram_host.weight_mmaps:
-                local_r = self.weights.engram_host.gather_local_cols(hashes, idx_e)
-                both[idx_e, :active_b] = local_r.reshape(active_b, 1536)
+        chips = self.weights.engram_host.fast_gather_both_chips(
+            windows_np[:active_b], b_tile=b_tile
+        )
         return jax.make_array_from_single_device_arrays(
             (16, 2, b_tile, 384),
             self.tp_s,
-            [
-                jax.device_put(
-                    np.ascontiguousarray(both[:, :, i * 384 : (i + 1) * 384][None, ...]),
-                    self.local_devs[i],
-                )
-                for i in range(4)
-            ],
+            [jax.device_put(chips[i], self.local_devs[i]) for i in range(4)],
         )
 
     def _get_step_kernel(self, active_b: int, max_comp: int, spec_k: int = 0) -> Any:

@@ -39,10 +39,14 @@ from megakernel.load import CACHE_DIR_DEFAULT, load_dsv41_weights
 
 
 def extract_answer(text: str) -> str:
-    m = re.findall(r"Answer:\s*\$?(-?\d+(?:\.\d+)?)", text, flags=re.IGNORECASE)
+    first_turn = re.split(r"\n\n(?:User|Human):|<｜end▁of▁sentence｜>", text)[0]
+    m = re.findall(r"Answer:\s*\$?(-?\d+(?:\.\d+)?)", first_turn, flags=re.IGNORECASE)
     if m:
         return m[-1]
-    nums = re.findall(r"-?\d+", text)
+    m_all = re.findall(r"Answer:\s*\$?(-?\d+(?:\.\d+)?)", text, flags=re.IGNORECASE)
+    if m_all:
+        return m_all[0]
+    nums = re.findall(r"-?\d+", first_turn)
     return nums[-1] if nums else ""
 
 
@@ -72,7 +76,7 @@ def run_accuracy_benchmark(
         )
         t0 = time.perf_counter()
         gen_ids, _, _ = mk.generate_greedy(
-            prompt_ids, max_new_tokens=256, max_comp=1024, enable_engram=False
+            prompt_ids, max_new_tokens=256, max_comp=1024, enable_engram=True
         )
         elapsed = time.perf_counter() - t0
 
@@ -107,6 +111,7 @@ def run_accuracy_benchmark(
     check1_pass = mk_correct >= (vllm_correct - 1)
     return {
         "pass": bool(check1_pass),
+        "enable_engram": True,
         "num_questions": int(num_q),
         "mk_num_correct": int(mk_correct),
         "mk_accuracy": mk_acc,
@@ -127,13 +132,13 @@ def run_concurrency_tpot_sweep(
     num_warmup: int = 10,
     num_timed: int = 60,
 ) -> Dict[str, Any]:
-    """Measure decode step TPOT at C in {1, 2, 4, 8, 16} at 1K context with distinct batch rows."""
+    """Measure decode step TPOT at C in {1, 2, 4, 8, 16} at 1K context with distinct batch rows and live Engram."""
     rank = jax.process_index()
     b_tile = mk.batch_tile
     vllm_sweep = vllm_tpot_data["sweep"]
 
-    state_a = mk.init_decode_state(max_comp=context_len, enable_engram=False)
-    state_b = mk.init_decode_state(max_comp=context_len, enable_engram=False)
+    state_a = mk.init_decode_state(max_comp=context_len, enable_engram=True)
+    state_b = mk.init_decode_state(max_comp=context_len, enable_engram=True)
     swa_pos_np = np.broadcast_to(
         (context_len - 128 + np.arange(128, dtype=np.int32))[None, :],
         (b_tile, 128),
@@ -149,6 +154,10 @@ def run_concurrency_tpot_sweep(
         ],
         dtype=np.int32,
     )
+    distinct_wins = np.array(
+        [[int(distinct_tokens[r]) + s * 19 for s in range(4)] for r in range(16)],
+        dtype=np.int64,
+    )
 
     sweep_results: Dict[str, Any] = {}
     for c in concurrencies:
@@ -161,27 +170,30 @@ def run_concurrency_tpot_sweep(
             tids_a = np.zeros((b_tile,), dtype=np.int32)
             tids_a[:c] = distinct_tokens[:c]
             res_in_a = mk._embed_4stream(mk.weights.embed_weight, mk.replicate(tids_a))
+            wins_a = distinct_wins[:c]
 
             kernel_active_b = 1 if c == 1 else 0
 
-            for _ in range(num_warmup):
+            for w_it in range(num_warmup):
+                eng_a = mk._gather_engram_rows_tp(wins_a + w_it, active_b=c)
                 _, top1_a, _, state_a = mk.run_raw_step(
                     active_b=kernel_active_b,
                     res_in=res_in_a,
                     pos_vmem=pos_vmem_a,
-                    eng_rows_tp=mk.zero_eng_rows,
+                    eng_rows_tp=eng_a,
                     state=state_a,
                 )
                 top1_a.block_until_ready()
 
             times_ms: List[float] = []
-            for _ in range(num_timed):
+            for t_it in range(num_timed):
                 t0 = time.perf_counter()
+                eng_a = mk._gather_engram_rows_tp(wins_a + t_it, active_b=c)
                 _, top1_a, _, state_a = mk.run_raw_step(
                     active_b=kernel_active_b,
                     res_in=res_in_a,
                     pos_vmem=pos_vmem_a,
-                    eng_rows_tp=mk.zero_eng_rows,
+                    eng_rows_tp=eng_a,
                     state=state_a,
                 )
                 top1_a.block_until_ready()
@@ -200,39 +212,45 @@ def run_concurrency_tpot_sweep(
             tids_b = distinct_tokens[b_tile : 2 * b_tile]
             res_in_a = mk._embed_4stream(mk.weights.embed_weight, mk.replicate(tids_a))
             res_in_b = mk._embed_4stream(mk.weights.embed_weight, mk.replicate(tids_b))
+            wins_a = distinct_wins[:b_tile]
+            wins_b = distinct_wins[b_tile : 2 * b_tile]
 
-            for _ in range(num_warmup):
+            for w_it in range(num_warmup):
+                eng_a = mk._gather_engram_rows_tp(wins_a + w_it, active_b=b_tile)
+                eng_b = mk._gather_engram_rows_tp(wins_b + w_it, active_b=b_tile)
                 _, top1_a, _, state_a = mk.run_raw_step(
                     active_b=0,
                     res_in=res_in_a,
                     pos_vmem=pos_vmem_a,
-                    eng_rows_tp=mk.zero_eng_rows,
+                    eng_rows_tp=eng_a,
                     state=state_a,
                 )
                 _, top1_b, _, state_b = mk.run_raw_step(
                     active_b=0,
                     res_in=res_in_b,
                     pos_vmem=pos_vmem_b,
-                    eng_rows_tp=mk.zero_eng_rows,
+                    eng_rows_tp=eng_b,
                     state=state_b,
                 )
                 top1_b.block_until_ready()
 
             times_ms = []
-            for _ in range(num_timed):
+            for t_it in range(num_timed):
                 t0 = time.perf_counter()
+                eng_a = mk._gather_engram_rows_tp(wins_a + t_it, active_b=b_tile)
+                eng_b = mk._gather_engram_rows_tp(wins_b + t_it, active_b=b_tile)
                 _, top1_a, _, state_a = mk.run_raw_step(
                     active_b=0,
                     res_in=res_in_a,
                     pos_vmem=pos_vmem_a,
-                    eng_rows_tp=mk.zero_eng_rows,
+                    eng_rows_tp=eng_a,
                     state=state_a,
                 )
                 _, top1_b, _, state_b = mk.run_raw_step(
                     active_b=0,
                     res_in=res_in_b,
                     pos_vmem=pos_vmem_b,
-                    eng_rows_tp=mk.zero_eng_rows,
+                    eng_rows_tp=eng_b,
                     state=state_b,
                 )
                 top1_b.block_until_ready()

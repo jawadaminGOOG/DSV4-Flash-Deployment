@@ -47,14 +47,14 @@ def warmup_engines(
     max_comp: int = 1024,
     spec_k: int = 5,
 ) -> None:
-    """Compile and warm up `(active_b=0, max_comp=max_comp, spec_k=spec_k)` and `DSparkDraftEngine`."""
-    state = mk.init_decode_state(max_comp=max_comp, enable_engram=False)
+    """Compile and warm up `(active_b=0, max_comp=max_comp, spec_k=spec_k)` and `DSparkDraftEngine` with live Engram."""
+    state = mk.init_decode_state(max_comp=max_comp, enable_engram=True)
     # 1. Warm up 1-token step + 5-token speculative verify step (shares the same compiled Pallas kernel)
     _, _, dspark_h, state = mk.verify_speculative_step(
-        [1280], state, enable_engram=False, spec_k=spec_k
+        [1280], state, enable_engram=True, spec_k=spec_k
     )
     _, _, dspark_h, state = mk.verify_speculative_step(
-        [1280, 2049, 3141, 4099, 5123], state, enable_engram=False, spec_k=spec_k
+        [1280, 2049, 3141, 4099, 5123], state, enable_engram=True, spec_k=spec_k
     )
     # 2. Warm up DSpark KV update + 3-stage MTP draft_block
     d_kv, d_pos = dspark_engine.init_kv_state()
@@ -79,12 +79,12 @@ def run_nonspec_greedy_timed(
     max_comp: int = 1024,
     spec_k: int = 5,
 ) -> Dict[str, Any]:
-    """Run non-speculative greedy decoding (1 token per step) and time the post-prefill decode loop."""
-    state = mk.init_decode_state(max_comp=max_comp, enable_engram=False)
+    """Run non-speculative greedy decoding (1 token per step) with live Engram and time the post-prefill decode loop."""
+    state = mk.init_decode_state(max_comp=max_comp, enable_engram=True)
     first_tok = 0
     for tid in prompt_ids_np:
         emitted, _, _, state = mk.verify_speculative_step(
-            [int(tid)], state, enable_engram=False, spec_k=spec_k
+            [int(tid)], state, enable_engram=True, spec_k=spec_k
         )
         first_tok = emitted[0]
 
@@ -94,7 +94,7 @@ def run_nonspec_greedy_timed(
     for _ in range(max_new_tokens - 1):
         t0_s = time.perf_counter()
         emitted, _, _, state = mk.verify_speculative_step(
-            [generated[-1]], state, enable_engram=False, spec_k=spec_k
+            [generated[-1]], state, enable_engram=True, spec_k=spec_k
         )
         step_times_ms.append((time.perf_counter() - t0_s) * 1000.0)
         generated.append(emitted[0])
@@ -184,7 +184,7 @@ def main():
             dspark_engine,
             max_new_tokens=n_gen,
             max_comp=args.max_comp,
-            enable_engram=False,
+            enable_engram=True,
             spec_k=args.spec_k,
             num_draft=args.num_draft,
         )

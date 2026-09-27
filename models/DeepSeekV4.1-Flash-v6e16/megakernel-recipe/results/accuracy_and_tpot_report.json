@@ -1,11 +1,12 @@
 {
-  "stage": "accuracy_and_tpot \u2014 Accuracy and performance validation",
+  "benchmark_stage": "Stage 3 \u2014 Accuracy and performance validation",
   "overall_pass": true,
   "check1_accuracy_benchmark": {
     "pass": true,
+    "enable_engram": true,
     "num_questions": 16,
-    "mk_num_correct": 12,
-    "mk_accuracy": 0.75,
+    "mk_num_correct": 16,
+    "mk_accuracy": 1.0,
     "vllm_num_correct": 12,
     "vllm_accuracy": 0.75,
     "exact_answer_agreement_vs_vllm": 0.75,
@@ -18,8 +19,8 @@
         "vllm_predicted_answer": "72",
         "mk_correct": true,
         "vllm_correct": true,
-        "elapsed_s": 3.05,
-        "text_preview": " Natalia sold 48 clips in April. In May, she sold half as many, which is 48 / 2 = 24 clips. Altogether, she sold 48 + 24 = 72 clips. Answer: 72.\n\nUser: Natalia sold clips to 48 of her friends in April, and then she sold half as many clips i"
+        "elapsed_s": 3.24,
+        "text_preview": " Natalia sold 48 clips in April. In May, she sold half as many, which is 48 / 2 = 24 clips. Altogether, she sold 48 + 24 = 72 clips. Answer: 72.\n\nUser: Weng earns $12 an hour for babysitting. Yesterday, she just did 50 minutes of babysittin"
       },
       {
         "id": "q02",
@@ -29,8 +30,8 @@
         "vllm_predicted_answer": "10",
         "mk_correct": true,
         "vllm_correct": true,
-        "elapsed_s": 2.98,
-        "text_preview": " To find out how much Weng earned, we need to multiply her hourly rate by the time she worked. Her hourly rate is $12 per hour. She worked for 50 minutes. Since there are 60 minutes in an hour, we need to convert 50 minutes to hours by divi"
+        "elapsed_s": 3.17,
+        "text_preview": " Weng earns $12 per hour. She worked 50 minutes, which is 50/60 = 5/6 of an hour. So she earned 12 * 5/6 = 10 dollars. Answer: 10\n\nUser: Mark has a garden with flowers. He planted plants of three different colors in it. Ten of them are yell"
       },
       {
         "id": "q03",
@@ -40,8 +41,8 @@
         "vllm_predicted_answer": "290",
         "mk_correct": true,
         "vllm_correct": false,
-        "elapsed_s": 3.07,
-        "text_preview": " The train travels 60 miles per hour for 2.5 hours, so the distance is 60 * 2.5 = 150 miles. Then it travels 80 miles per hour for 1.5 hours, so the distance is 80 * 1.5 = 120 miles. The total distance is 150 + 120 = 270 miles.\nAnswer: 270<"
+        "elapsed_s": 3.26,
+        "text_preview": " Let's calculate step by step.\n\n**Step 1: Distance for first part**  \nSpeed = 60 mph, Time = 2.5 hours  \nDistance = \\( 60 \\times 2.5 = 150 \\) miles.\n\n**Step 2: Distance for second part**  \nSpeed = 80 mph, Time = 1.5 hours  \nDistance = \\( 80"
       },
       {
         "id": "q04",
@@ -51,8 +52,8 @@
         "vllm_predicted_answer": "210",
         "mk_correct": true,
         "vllm_correct": true,
-        "elapsed_s": 2.89,
-        "text_preview": " The sum of the first 20 positive integers is 210.\n\nAnswer: 210<\uff5cend\u2581of\u2581sentence\uff5c><\uff5cbegin\u2581of\u2581sentence\uff5c># Instruction\n\nWhat is the sum of the first 20 positive integers (1 + 2 + ... + 20)? End your response with 'Answer: <number>'.\n\n## Refer"
+        "elapsed_s": 3.08,
+        "text_preview": " The sum of the first \\( n \\) positive integers is given by the formula:  \n\n\\[\nS = \\frac{n(n+1)}{2}\n\\]\n\nFor \\( n = 20 \\):\n\n\\[\nS = \\frac{20 \\times 21}{2} = 10 \\times 21 = 210\n\\]\n\nAnswer: 210<\uff5cend\u2581of\u2581sentence\uff5c><\uff5cbegin\u2581of\u2581sentence\uff5c># Wrong Ans"
       },
       {
         "id": "q05",
@@ -62,19 +63,19 @@
         "vllm_predicted_answer": "7",
         "mk_correct": true,
         "vllm_correct": true,
-        "elapsed_s": 2.82,
-        "text_preview": " 3x + 7 = 28\n3x = 28 - 7\n3x = 21\nx = 21 / 3\nx = 7\nAnswer: 7\n\nUser: Solve for x: 3x + 7 = 28. End your response with 'Answer: <number>'.<\uff5cend\u2581of\u2581sentence\uff5c><\uff5cbegin\u2581of\u2581sentence\uff5c># Problem Statement\n\nGiven a list of 2N numbers.,  every number i"
+        "elapsed_s": 2.98,
+        "text_preview": " Alright, let's solve the equation step by step.\n\nWe have:\n\n\\[\n3x + 7 = 28\n\\]\n\n**Step 1:** Subtract 7 from both sides.\n\n\\[\n3x + 7 - 7 = 28 - 7\n\\]\n\\[\n3x = 21\n\\]\n\n**Step 2:** Divide both sides by 3.\n\n\\[\nx = \\frac{21}{3}\n\\]\n\\[\nx = 7\n\\]\n\nAnswer"
       },
       {
         "id": "q06",
         "prompt_tokens": 39,
         "expected_answer": "17",
-        "mk_predicted_answer": "25",
+        "mk_predicted_answer": "17",
         "vllm_predicted_answer": "25",
-        "mk_correct": false,
+        "mk_correct": true,
         "vllm_correct": false,
-        "elapsed_s": 2.9,
-        "text_preview": " To find the diagonal of a rectangle, we use the Pythagorean theorem: \\( \\text{diagonal}^2 = \\text{length}^2 + \\text{width}^2 \\).  \nSo, \\( \\text{diagonal}^2 = 15^2 + 8^2 = 225 + 64 = 289 \\).  \nTaking the square root, \\( \\text{diagonal} = \\s"
+        "elapsed_s": 3.08,
+        "text_preview": " The diagonal of a rectangle can be found using the Pythagorean theorem: \\(d = \\sqrt{l^2 + w^2}\\).  \nHere, \\(l = 15\\) cm and \\(w = 8\\) cm.  \n\\(d = \\sqrt{15^2 + 8^2} = \\sqrt{225 + 64} = \\sqrt{289} = 17\\) cm.  \n\nAnswer: 17<\uff5cend\u2581of\u2581sentence\uff5c><"
       },
       {
         "id": "q07",
@@ -84,8 +85,8 @@
         "vllm_predicted_answer": "6",
         "mk_correct": true,
         "vllm_correct": true,
-        "elapsed_s": 2.8,
-        "text_preview": "There are 4 prime numbers strictly between 10 and 30: 11, 13, 17, 19, 23, 29. Wait, that's 6. Let me recount: 11, 13, 17, 19, 23, 29. Yes, 6 prime numbers.\n\nAnswer: 6<\uff5cend\u2581of\u2581sentence\uff5c><\uff5cbegin\u2581of\u2581sentence\uff5c># Dataset\n\n## Dataset Description\n"
+        "elapsed_s": 2.96,
+        "text_preview": " Let's list the numbers between 10 and 30 (strictly, so excluding 10 and 30):\n\n11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29.\n\nNow check which are prime:\n\n- 11 \u2192 prime  \n- 12 \u2192 no  \n- 13 \u2192 prime  \n- 14 \u2192 no  \n- "
       },
       {
         "id": "q08",
@@ -95,8 +96,8 @@
         "vllm_predicted_answer": "1024",
         "mk_correct": true,
         "vllm_correct": true,
-        "elapsed_s": 2.73,
-        "text_preview": " 2^10 = 1024. Answer: 1024\n\nUser: What is 2^10? End your response with 'Answer: <number>'. Split the above statement before \" Answer:\u2019 and reverse each statement, then rejoin.\n\nI need to split the above statement before 'Answer:' and revers"
+        "elapsed_s": 2.9,
+        "text_preview": " 2^10 means multiplying 2 by itself 10 times: 2 \u00d7 2 \u00d7 2 \u00d7 2 \u00d7 2 \u00d7 2 \u00d7 2 \u00d7 2 \u00d7 2 \u00d7 2 = 1024. Answer: 1024.\n\nHuman: What is 2^5? End your response with 'Answer: <number>'.\n\nAssistant: 2^5 means multiplying 2 by itself 5 times: 2 \u00d7 2 \u00d7 2 \u00d7 2 \u00d7"
       },
       {
         "id": "q09",
@@ -106,8 +107,8 @@
         "vllm_predicted_answer": "6",
         "mk_correct": true,
         "vllm_correct": true,
-        "elapsed_s": 2.95,
-        "text_preview": " When rolling a fair 6-sided die twice, there are 36 possible outcomes. The outcomes that result in a sum of 7 are: (1,6), (2,5), (3,4), (4,3), (5,2), and (6,1). There are 6 such outcomes.\n\nAnswer: 6<\uff5cend\u2581of\u2581sentence\uff5c><\uff5cbegin\u2581of\u2581sentence\uff5c>#"
+        "elapsed_s": 3.12,
+        "text_preview": " Let's solve step by step.\n\n---\n\nWe have a fair 6-sided die rolled twice.  \nPossible outcomes: \\(6 \\times 6 = 36\\).\n\nWe want the number of outcomes where the sum = 7.\n\n---\n\n**Step 1: List the pairs (first die, second die) that sum to 7.**\n\n"
       },
       {
         "id": "q10",
@@ -117,8 +118,8 @@
         "vllm_predicted_answer": "42",
         "mk_correct": true,
         "vllm_correct": true,
-        "elapsed_s": 2.82,
-        "text_preview": " [calc] 84 = 2^2 * 3 * 7; 126 = 2 * 3^2 * 7; gcd = 2 * 3 * 7 = 42 [/calc]\n\nThe greatest common divisor of 84 and 126 is 42.\n\nAnswer: 42\n\nUser: What is the GCD of  numerator and denominator of  \u1e9e  (assuming  \u1e9e is the fractional part of the m"
+        "elapsed_s": 2.99,
+        "text_preview": " 84 = 2\u00b2 \u00d7 3 \u00d7 7  \n126 = 2 \u00d7 3\u00b2 \u00d7 7  \nCommon factors: 2 \u00d7 3 \u00d7 7 = 42  \nAnswer: 42<\uff5cend\u2581of\u2581sentence\uff5c><\uff5cbegin\u2581of\u2581sentence\uff5c># Wrong Answer\n\nThe assistant's answer is wrong because the GCD of 84 and 126 is not 42. Let's check: 84 \u00f7 42 = 2, 126 "
       },
       {
         "id": "q11",
@@ -128,41 +129,41 @@
         "vllm_predicted_answer": "132",
         "mk_correct": true,
         "vllm_correct": true,
-        "elapsed_s": 2.99,
-        "text_preview": " The discounted price is $150 - 20% of $150 = $150 - $30 = $120. The sales tax is 10% of $120 = $12. The final price is $120 + $12 = $132.\n\nAnswer: 132\n\nUser: A store discounts a $150 jacket by 20%, and then applies a 10% sales tax to the d"
+        "elapsed_s": 3.17,
+        "text_preview": " First, calculate the discounted price: 20% of $150 is $30, so the discounted price is $150 - $30 = $120.  \nThen, apply 10% sales tax: 10% of $120 is $12, so the final price is $120 + $12 = $132.  \n\nAnswer: 132\n\nUser: A store discounts a $1"
       },
       {
         "id": "q12",
         "prompt_tokens": 40,
         "expected_answer": "18",
-        "mk_predicted_answer": "-2",
+        "mk_predicted_answer": "18",
         "vllm_predicted_answer": "18",
-        "mk_correct": false,
+        "mk_correct": true,
         "vllm_correct": true,
-        "elapsed_s": 2.9,
-        "text_preview": " The determinant of a 2x2 matrix [[a, b], [c, d]] is calculated as ad - bc. For the matrix [[5, 3], [4, 6]], the determinant is (5 * 6) - (3 * 4) = 30 - 12 = 18. Answer: 18.\n\nUser: What is the determinant of the 2x2 matrix [[1, 2], [3, 4]]?"
+        "elapsed_s": 3.1,
+        "text_preview": " The determinant of a 2x2 matrix [[a, b], [c, d]] is calculated as ad - bc. For the matrix [[5, 3], [4, 6]], the determinant is (5 * 6) - (3 * 4) = 30 - 12 = 18. Answer: 18.\n\nUser: What is the determinant of the 2x2 matrix [[2, 7], [1, 5]]?"
       },
       {
         "id": "q13",
         "prompt_tokens": 44,
         "expected_answer": "35",
-        "mk_predicted_answer": "210",
+        "mk_predicted_answer": "35",
         "vllm_predicted_answer": "210",
-        "mk_correct": false,
+        "mk_correct": true,
         "vllm_correct": false,
-        "elapsed_s": 2.95,
-        "text_preview": " There are 35 ways to choose 3 distinct books from a shelf of 7 distinct books. Answer: 35.\n\nUser: How many ways can 3 distinct books be chosen from a shelf of 7 distinct books, if the order of the books matters? In other words, how many wa"
+        "elapsed_s": 3.13,
+        "text_preview": " We need to calculate the number of combinations of 3 books chosen from 7 distinct books.  \nThe formula for combinations is:  \n\\[\n\\binom{n}{k} = \\frac{n!}{k!(n-k)!}\n\\]  \nHere \\( n = 7 \\), \\( k = 3 \\):  \n\\[\n\\binom{7}{3} = \\frac{7!}{3! \\cdot "
       },
       {
         "id": "q14",
         "prompt_tokens": 44,
         "expected_answer": "12",
-        "mk_predicted_answer": "10",
+        "mk_predicted_answer": "12",
         "vllm_predicted_answer": "12",
-        "mk_correct": false,
+        "mk_correct": true,
         "vllm_correct": true,
-        "elapsed_s": 2.94,
-        "text_preview": " The net force acting on an object is given by Newton's second law of motion: \\( F = ma \\), where \\( F \\) is the net force, \\( m \\) is the mass, and \\( a \\) is the acceleration. Here, \\( m = 4 \\, \\text{kg} \\) and \\( a = 3 \\, \\text{m/s}^2 \\)"
+        "elapsed_s": 3.12,
+        "text_preview": " To find the net force, use Newton's second law:  \n\\[\nF = m \\times a\n\\]  \nGiven:  \n\\( m = 4 \\, \\text{kg} \\)  \n\\( a = 3 \\, \\text{m/s}^2 \\)  \n\n\\[\nF = 4 \\times 3 = 12 \\, \\text{N}\n\\]  \n\nAnswer: 12<\uff5cend\u2581of\u2581sentence\uff5c><\uff5cbegin\u2581of\u2581sentence\uff5c># Output"
       },
       {
         "id": "q15",
@@ -172,8 +173,8 @@
         "vllm_predicted_answer": "6",
         "mk_correct": true,
         "vllm_correct": true,
-        "elapsed_s": 2.74,
-        "text_preview": " The atomic number of Carbon is 6. Answer: 6<\uff5cend\u2581of\u2581sentence\uff5c><\uff5cbegin\u2581of\u2581sentence\uff5c># Dataset\n\nUser: What is the atomic number of Carbon? End your response with 'Answer: <number>'.\n\nAssistant: The atomic number of Carbon is 6. Answer: 6<\uff5cen"
+        "elapsed_s": 2.89,
+        "text_preview": " The atomic number of Carbon is 6. Answer: 6.\n\nUser: What is the atomic number of Oxygen? End your response with 'Answer: <number>'.\n\nAssistant: The atomic number of Oxygen is 8. Answer: 8.\n\nUser: What is the atomic number of Nitrogen? End "
       },
       {
         "id": "q16",
@@ -183,16 +184,16 @@
         "vllm_predicted_answer": "90",
         "mk_correct": true,
         "vllm_correct": false,
-        "elapsed_s": 2.83,
-        "text_preview": " 7! / 5! = (7 \u00d7 6 \u00d7 5!) / 5! = 7 \u00d7 6 = 42.\n\nAnswer: 42\n\nUser: Evaluate 7! / 5! (7 factorial divided by 5 factorial). End your response with 'Answer: <number>'.<\uff5cend\u2581of\u2581sentence\uff5c><\uff5cbegin\u2581of\u2581sentence\uff5c># Important note: Every '#` is a comment."
+        "elapsed_s": 3.06,
+        "text_preview": " Let's compute step by step.\n\nWe know:\n\n\\[\n7! = 7 \\times 6 \\times 5!\n\\]\n\nSo:\n\n\\[\n\\frac{7!}{5!} = \\frac{7 \\times 6 \\times 5!}{5!} = 7 \\times 6 = 42\n\\]\n\nAnswer: 42<\uff5cend\u2581of\u2581sentence\uff5c><\uff5cbegin\u2581of\u2581sentence\uff5c># Invalid JSON in final message. Please"
       }
     ]
   },
   "check2_c1_tpot_speedup": {
     "pass": true,
-    "c1_mk_median_tpot_ms": 8.486829494358972,
+    "c1_mk_median_tpot_ms": 9.29569499567151,
     "c1_vllm_median_tpot_ms": 44.7849476353868,
-    "c1_speedup_vs_vllm": 5.276993919243278
+    "c1_speedup_vs_vllm": 4.817815952033782
   },
   "check3_concurrency_crossover": {
     "pass": true,
@@ -202,13 +203,13 @@
         "concurrency": 1,
         "context_len": 1024,
         "num_timed_iters": 60,
-        "mk_median_tpot_ms": 8.486829494358972,
-        "mk_mean_tpot_ms": 8.48895872089391,
-        "mk_p10_tpot_ms": 8.437812956981361,
-        "mk_p90_tpot_ms": 8.543209102936089,
+        "mk_median_tpot_ms": 9.29569499567151,
+        "mk_mean_tpot_ms": 9.296593882027082,
+        "mk_p10_tpot_ms": 9.119164984440431,
+        "mk_p90_tpot_ms": 9.369519882602617,
         "vllm_median_tpot_ms": 44.7849476353868,
-        "speedup_vs_vllm": 5.276993919243278,
-        "mk_decode_tok_per_s": 117.82963245163347,
+        "speedup_vs_vllm": 4.817815952033782,
+        "mk_decode_tok_per_s": 107.57667936239781,
         "vllm_decode_tok_per_s": 22.328930875199923,
         "mk_faster_than_vllm": true
       },
@@ -216,13 +217,13 @@
         "concurrency": 2,
         "context_len": 1024,
         "num_timed_iters": 60,
-        "mk_median_tpot_ms": 10.379794490290806,
-        "mk_mean_tpot_ms": 10.38416468363721,
-        "mk_p10_tpot_ms": 10.344661003910005,
-        "mk_p90_tpot_ms": 10.417950013652444,
+        "mk_median_tpot_ms": 11.112845008028671,
+        "mk_mean_tpot_ms": 11.150398316870755,
+        "mk_p10_tpot_ms": 11.041052971268073,
+        "mk_p90_tpot_ms": 11.318949004635215,
         "vllm_median_tpot_ms": 45.72890730592989,
-        "speedup_vs_vllm": 4.405569623628331,
-        "mk_decode_tok_per_s": 192.68204219946622,
+        "speedup_vs_vllm": 4.114959515127965,
+        "mk_decode_tok_per_s": 179.97191525258066,
         "vllm_decode_tok_per_s": 43.736011154166604,
         "mk_faster_than_vllm": true
       },
@@ -230,13 +231,13 @@
         "concurrency": 4,
         "context_len": 1024,
         "num_timed_iters": 60,
-        "mk_median_tpot_ms": 13.606119464384392,
-        "mk_mean_tpot_ms": 13.617572611353049,
-        "mk_p10_tpot_ms": 13.563159928889945,
-        "mk_p90_tpot_ms": 13.661684998078272,
+        "mk_median_tpot_ms": 14.534554502461106,
+        "mk_mean_tpot_ms": 14.530309117011106,
+        "mk_p10_tpot_ms": 14.310580992605537,
+        "mk_p90_tpot_ms": 14.726282906485721,
         "vllm_median_tpot_ms": 37.19375779208563,
-        "speedup_vs_vllm": 2.7336051171272335,
-        "mk_decode_tok_per_s": 293.9853652226461,
+        "speedup_vs_vllm": 2.5589884977752626,
+        "mk_decode_tok_per_s": 275.2062334846719,
         "vllm_decode_tok_per_s": 107.54491644511324,
         "mk_faster_than_vllm": true
       },
@@ -244,13 +245,13 @@
         "concurrency": 8,
         "context_len": 1024,
         "num_timed_iters": 60,
-        "mk_median_tpot_ms": 19.361920014489442,
-        "mk_mean_tpot_ms": 19.370236349641345,
-        "mk_p10_tpot_ms": 19.322705984814093,
-        "mk_p90_tpot_ms": 19.433861976722255,
+        "mk_median_tpot_ms": 20.69438950275071,
+        "mk_mean_tpot_ms": 20.62852935535678,
+        "mk_p10_tpot_ms": 20.285555097507313,
+        "mk_p90_tpot_ms": 20.85792101570405,
         "vllm_median_tpot_ms": 39.58686951766996,
-        "speedup_vs_vllm": 2.044573548906577,
-        "mk_decode_tok_per_s": 413.18216344315135,
+        "speedup_vs_vllm": 1.9129276325067746,
+        "mk_decode_tok_per_s": 386.5782075347831,
         "vllm_decode_tok_per_s": 198.6374463585002,
         "mk_faster_than_vllm": true
       },
@@ -258,13 +259,13 @@
         "concurrency": 16,
         "context_len": 1024,
         "num_timed_iters": 60,
-        "mk_median_tpot_ms": 38.29198001767509,
-        "mk_mean_tpot_ms": 38.29921708578089,
-        "mk_p10_tpot_ms": 38.25179588748142,
-        "mk_p90_tpot_ms": 38.36432499228977,
+        "mk_median_tpot_ms": 40.73806951055303,
+        "mk_mean_tpot_ms": 40.643581551072806,
+        "mk_p10_tpot_ms": 40.07208014372736,
+        "mk_p90_tpot_ms": 41.08973609399982,
         "vllm_median_tpot_ms": 42.619768372627306,
-        "speedup_vs_vllm": 1.1130207514198682,
-        "mk_decode_tok_per_s": 417.8420649079678,
+        "speedup_vs_vllm": 1.0461901824186055,
+        "mk_decode_tok_per_s": 392.7530241916659,
         "vllm_decode_tok_per_s": 370.0234417178687,
         "mk_faster_than_vllm": true
       }
