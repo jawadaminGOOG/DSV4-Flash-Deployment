@@ -1,0 +1,544 @@
+{
+  "started": "2026-09-25T15:02:42Z",
+  "environment": {
+    "ok": true,
+    "host": "probe-c-0925-w-0-2",
+    "python": "3.12.14",
+    "jax": "0.11.1",
+    "jaxlib": "0.11.1",
+    "libtpu": "0.0.46.1",
+    "backend": "tpu",
+    "process_index": 0,
+    "process_count": 4,
+    "device_count": 32,
+    "local_device_count": 8,
+    "devices": [
+      {
+        "id": 0,
+        "process_index": 0,
+        "kind": "TPU7x",
+        "coords": [
+          0,
+          0,
+          0
+        ],
+        "core_on_chip": 0,
+        "platform": "tpu"
+      },
+      {
+        "id": 1,
+        "process_index": 0,
+        "kind": "TPU7x",
+        "coords": [
+          0,
+          0,
+          0
+        ],
+        "core_on_chip": 1,
+        "platform": "tpu"
+      },
+      {
+        "id": 2,
+        "process_index": 0,
+        "kind": "TPU7x",
+        "coords": [
+          1,
+          0,
+          0
+        ],
+        "core_on_chip": 0,
+        "platform": "tpu"
+      },
+      {
+        "id": 3,
+        "process_index": 0,
+        "kind": "TPU7x",
+        "coords": [
+          1,
+          0,
+          0
+        ],
+        "core_on_chip": 1,
+        "platform": "tpu"
+      },
+      {
+        "id": 4,
+        "process_index": 0,
+        "kind": "TPU7x",
+        "coords": [
+          0,
+          1,
+          0
+        ],
+        "core_on_chip": 0,
+        "platform": "tpu"
+      },
+      {
+        "id": 5,
+        "process_index": 0,
+        "kind": "TPU7x",
+        "coords": [
+          0,
+          1,
+          0
+        ],
+        "core_on_chip": 1,
+        "platform": "tpu"
+      },
+      {
+        "id": 6,
+        "process_index": 0,
+        "kind": "TPU7x",
+        "coords": [
+          1,
+          1,
+          0
+        ],
+        "core_on_chip": 0,
+        "platform": "tpu"
+      },
+      {
+        "id": 7,
+        "process_index": 0,
+        "kind": "TPU7x",
+        "coords": [
+          1,
+          1,
+          0
+        ],
+        "core_on_chip": 1,
+        "platform": "tpu"
+      },
+      {
+        "id": 8,
+        "process_index": 1,
+        "kind": "TPU7x",
+        "coords": [
+          0,
+          0,
+          1
+        ],
+        "core_on_chip": 0,
+        "platform": "tpu"
+      },
+      {
+        "id": 9,
+        "process_index": 1,
+        "kind": "TPU7x",
+        "coords": [
+          0,
+          0,
+          1
+        ],
+        "core_on_chip": 1,
+        "platform": "tpu"
+      },
+      {
+        "id": 10,
+        "process_index": 1,
+        "kind": "TPU7x",
+        "coords": [
+          1,
+          0,
+          1
+        ],
+        "core_on_chip": 0,
+        "platform": "tpu"
+      },
+      {
+        "id": 11,
+        "process_index": 1,
+        "kind": "TPU7x",
+        "coords": [
+          1,
+          0,
+          1
+        ],
+        "core_on_chip": 1,
+        "platform": "tpu"
+      },
+      {
+        "id": 12,
+        "process_index": 1,
+        "kind": "TPU7x",
+        "coords": [
+          0,
+          1,
+          1
+        ],
+        "core_on_chip": 0,
+        "platform": "tpu"
+      },
+      {
+        "id": 13,
+        "process_index": 1,
+        "kind": "TPU7x",
+        "coords": [
+          0,
+          1,
+          1
+        ],
+        "core_on_chip": 1,
+        "platform": "tpu"
+      },
+      {
+        "id": 14,
+        "process_index": 1,
+        "kind": "TPU7x",
+        "coords": [
+          1,
+          1,
+          1
+        ],
+        "core_on_chip": 0,
+        "platform": "tpu"
+      },
+      {
+        "id": 15,
+        "process_index": 1,
+        "kind": "TPU7x",
+        "coords": [
+          1,
+          1,
+          1
+        ],
+        "core_on_chip": 1,
+        "platform": "tpu"
+      },
+      {
+        "id": 16,
+        "process_index": 2,
+        "kind": "TPU7x",
+        "coords": [
+          0,
+          0,
+          2
+        ],
+        "core_on_chip": 0,
+        "platform": "tpu"
+      },
+      {
+        "id": 17,
+        "process_index": 2,
+        "kind": "TPU7x",
+        "coords": [
+          0,
+          0,
+          2
+        ],
+        "core_on_chip": 1,
+        "platform": "tpu"
+      },
+      {
+        "id": 18,
+        "process_index": 2,
+        "kind": "TPU7x",
+        "coords": [
+          1,
+          0,
+          2
+        ],
+        "core_on_chip": 0,
+        "platform": "tpu"
+      },
+      {
+        "id": 19,
+        "process_index": 2,
+        "kind": "TPU7x",
+        "coords": [
+          1,
+          0,
+          2
+        ],
+        "core_on_chip": 1,
+        "platform": "tpu"
+      },
+      {
+        "id": 20,
+        "process_index": 2,
+        "kind": "TPU7x",
+        "coords": [
+          0,
+          1,
+          2
+        ],
+        "core_on_chip": 0,
+        "platform": "tpu"
+      },
+      {
+        "id": 21,
+        "process_index": 2,
+        "kind": "TPU7x",
+        "coords": [
+          0,
+          1,
+          2
+        ],
+        "core_on_chip": 1,
+        "platform": "tpu"
+      },
+      {
+        "id": 22,
+        "process_index": 2,
+        "kind": "TPU7x",
+        "coords": [
+          1,
+          1,
+          2
+        ],
+        "core_on_chip": 0,
+        "platform": "tpu"
+      },
+      {
+        "id": 23,
+        "process_index": 2,
+        "kind": "TPU7x",
+        "coords": [
+          1,
+          1,
+          2
+        ],
+        "core_on_chip": 1,
+        "platform": "tpu"
+      },
+      {
+        "id": 24,
+        "process_index": 3,
+        "kind": "TPU7x",
+        "coords": [
+          0,
+          0,
+          3
+        ],
+        "core_on_chip": 0,
+        "platform": "tpu"
+      },
+      {
+        "id": 25,
+        "process_index": 3,
+        "kind": "TPU7x",
+        "coords": [
+          0,
+          0,
+          3
+        ],
+        "core_on_chip": 1,
+        "platform": "tpu"
+      },
+      {
+        "id": 26,
+        "process_index": 3,
+        "kind": "TPU7x",
+        "coords": [
+          1,
+          0,
+          3
+        ],
+        "core_on_chip": 0,
+        "platform": "tpu"
+      },
+      {
+        "id": 27,
+        "process_index": 3,
+        "kind": "TPU7x",
+        "coords": [
+          1,
+          0,
+          3
+        ],
+        "core_on_chip": 1,
+        "platform": "tpu"
+      },
+      {
+        "id": 28,
+        "process_index": 3,
+        "kind": "TPU7x",
+        "coords": [
+          0,
+          1,
+          3
+        ],
+        "core_on_chip": 0,
+        "platform": "tpu"
+      },
+      {
+        "id": 29,
+        "process_index": 3,
+        "kind": "TPU7x",
+        "coords": [
+          0,
+          1,
+          3
+        ],
+        "core_on_chip": 1,
+        "platform": "tpu"
+      },
+      {
+        "id": 30,
+        "process_index": 3,
+        "kind": "TPU7x",
+        "coords": [
+          1,
+          1,
+          3
+        ],
+        "core_on_chip": 0,
+        "platform": "tpu"
+      },
+      {
+        "id": 31,
+        "process_index": 3,
+        "kind": "TPU7x",
+        "coords": [
+          1,
+          1,
+          3
+        ],
+        "core_on_chip": 1,
+        "platform": "tpu"
+      }
+    ],
+    "memory": {
+      "0": {
+        "bytes_limit": 101724438528,
+        "bytes_in_use": 65536,
+        "largest_free_block_bytes": 101724372992
+      },
+      "1": {
+        "bytes_limit": 101724438528,
+        "bytes_in_use": 65536,
+        "largest_free_block_bytes": 101724372992
+      },
+      "2": {
+        "bytes_limit": 101724438528,
+        "bytes_in_use": 65536,
+        "largest_free_block_bytes": 101724372992
+      },
+      "3": {
+        "bytes_limit": 101724438528,
+        "bytes_in_use": 65536,
+        "largest_free_block_bytes": 101724372992
+      },
+      "4": {
+        "bytes_limit": 101724438528,
+        "bytes_in_use": 65536,
+        "largest_free_block_bytes": 101724372992
+      },
+      "5": {
+        "bytes_limit": 101724438528,
+        "bytes_in_use": 65536,
+        "largest_free_block_bytes": 101724372992
+      },
+      "6": {
+        "bytes_limit": 101724438528,
+        "bytes_in_use": 65536,
+        "largest_free_block_bytes": 101724372992
+      },
+      "7": {
+        "bytes_limit": 101724438528,
+        "bytes_in_use": 65536,
+        "largest_free_block_bytes": 101724372992
+      }
+    },
+    "tpu_info": {
+      "bf16_ops_per_second": 1155000000000000,
+      "chip_version": "7x",
+      "cmem_capacity_bytes": 0,
+      "fp8_ops_per_second": 2300000000000000,
+      "generation": 7,
+      "hbm_capacity_bytes": 103000000000,
+      "int4_ops_per_second": 0,
+      "int8_ops_per_second": 0,
+      "is_lite": false,
+      "is_megacore": false,
+      "is_split_chip": true,
+      "mem_bw_bytes_per_second": 3700000000000,
+      "mxu_column_size": 256,
+      "num_accumulators": 128,
+      "num_cores": 1,
+      "num_lanes": 128,
+      "num_mxus": 2,
+      "num_sublanes": 8,
+      "smem_capacity_bytes": 1048576,
+      "sparse_core": "SparseCoreInfo(num_cores=2, num_subcores=16, num_lanes=16, vmem_capacity_bytes=524288, dma_granule_size_bytes=32)",
+      "vmem_capacity_bytes": 67108864
+    },
+    "env": {
+      "TPU_PROCESS_ADDRESSES": "probe-c-0925-w-0-0.probe-c-0925:8471,probe-c-0925-w-0-1.probe-c-0925:8471,probe-c-0925-w-0-2.probe-c-0925:8471,probe-c-0925-w-0-3.probe-c-0925:8471",
+      "TPU_TOPOLOGY": "2x2x4",
+      "TPU_WORKER_ID": "2",
+      "TPU_SKIP_MDS_QUERY": "true",
+      "TPU_TOPOLOGY_WRAP": "false,false,false",
+      "JOB_COMPLETION_INDEX": "2",
+      "TPU_CHIPS_PER_HOST_BOUNDS": "2,2,1",
+      "TPU_PROCESS_PORT": "8471",
+      "TPU_LOG_DIR": "/tmp/tpu_logs/main",
+      "NUM_PROCESSES": "4",
+      "COORDINATOR_ADDRESS": "probe-c-0925-w-0-0.probe-c-0925:8476",
+      "TPU_ACCELERATOR_TYPE": "tpu7x-32",
+      "TPU_RUNTIME_METRICS_PORTS": "8431,8432,8433,8434,8435,8436,8437,8438",
+      "JAX_COMPILATION_CACHE_DIR": "/tmp/jax-cache",
+      "TPU_TOPOLOGY_ALT": "false",
+      "JAX_PLATFORMS": "tpu",
+      "TPU_HOST_BOUNDS": "1,1,4",
+      "XLA_FLAGS": "--xla_allow_excess_precision=false",
+      "TPU_WORKER_HOSTNAMES": "probe-c-0925-w-0-0.probe-c-0925,probe-c-0925-w-0-1.probe-c-0925,probe-c-0925-w-0-2.probe-c-0925,probe-c-0925-w-0-3.probe-c-0925",
+      "TPU_LIBRARY_PATH": "/usr/local/lib/python3.12/site-packages/libtpu/libtpu.so",
+      "TPU_ML_PLATFORM": "JAX",
+      "TPU_ML_PLATFORM_VERSION": "0.11.1",
+      "LIBTPU_INIT_ARGS": " --xla_tpu_use_enhanced_launch_barrier=true"
+    },
+    "cpu_count": 224,
+    "shm_bytes_free": 644245094400,
+    "seconds": 4.371
+  },
+  "hbm_bandwidth": {
+    "ok": true,
+    "bytes_moved_per_rep": 8589934592,
+    "seconds_per_rep": 0.00268704349999922,
+    "gbps": 3196.7977414591514,
+    "seconds": 0.48
+  },
+  "pallas_features": {
+    "ok": true,
+    "vmem_60mib": true,
+    "fp8_x_fp8": {
+      "max_abs_err": 0.44515228271484375,
+      "max_abs_ref": 92.36763000488281
+    },
+    "bf16_x_fp8": {
+      "max_abs_err": 0.0,
+      "max_abs_ref": 92.51205444335938
+    },
+    "mxfp4_to_fp8": {
+      "err_vs_rows_interleaved_by_nibble": 1.52587890625e-05,
+      "err_vs_rows_blocked_by_nibble": 366.39471435546875,
+      "max_abs_ref": 237.64639282226562
+    },
+    "seconds": 0.668
+  },
+  "remote_dma": {
+    "ok": false,
+    "error": "RuntimeError('Fetching value for `jax.Array` that spans non-addressable (non process local) devices is not possible. You can use `jax.experimental.multihost_utils.process_allgather` to print the global array or use `.addressable_shards` method of jax.Array to inspect the addressable (process local) shards.')",
+    "trace": "Traceback (most recent call last):\n  File \"/app/deepseek_v41/tpu-v7x/scripts/probe_v7x.py\", line 51, in _run\n    results[name] = {\"ok\": True, **fn(*args, **kwargs)}\n                                   ^^^^^^^^^^^^^^^^^^^\n  File \"/app/deepseek_v41/tpu-v7x/scripts/probe_v7x.py\", line 309, in probe_remote_dma\n    got = np.asarray(jax.device_get(y))\n                     ^^^^^^^^^^^^^^^^^\n  File \"/usr/local/lib/python3.12/site-packages/jax/_src/api.py\", line 2586, in device_get\n    return tree_map(_device_get, x)\n           ^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/usr/local/lib/python3.12/site-packages/jax/_src/tree_util.py\", line 400, in tree_map\n    return treedef.unflatten(f(*xs) for xs in zip(*all_leaves))\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/usr/local/lib/python3.12/site-packages/jax/_src/tree_util.py\", line 400, in <genexpr>\n    return treedef.unflatten(f(*xs) for xs in zip(*all_leaves))\n                             ^^^^^^\n  File \"/usr/local/lib/python3.12/site-packages/jax/_src/api.py\", line 2547, in _device_get\n    return toarray()\n           ^^^^^^^^^\n  File \"/usr/local/lib/python3.12/site-packages/jax/_src/array.py\", line 414, in __array__\n    return np.asarray(self._value, dtype=dtype, **kwds)  # pyrefly: ignore[no-matching-overload]\n                      ^^^^^^^^^^^\n  File \"/usr/local/lib/python3.12/site-packages/jax/_src/profiler.py\", line 420, in wrapper\n    return func(*args, **kwargs)\n           ^^^^^^^^^^^^^^^^^^^^^\n  File \"/usr/local/lib/python3.12/site-packages/jax/_src/array.py\", line 653, in _value\n    raise RuntimeError(\nRuntimeError: Fetching value for `jax.Array` that spans non-addressable (non process local) devices is not possible. You can use `jax.experimental.multihost_utils.process_allgather` to print the global array or use `.addressable_shards` method of jax.Array to inspect the addressable (process local) shards.\n",
+    "seconds": 3.719
+  },
+  "storage": {
+    "ok": true,
+    "files": [
+      "model-00003-of-00048.safetensors",
+      "model-00004-of-00048.safetensors",
+      "model-00005-of-00048.safetensors",
+      "model-00006-of-00048.safetensors"
+    ],
+    "bytes": 29575230880,
+    "moved": 29575230880,
+    "workers": 64,
+    "download_seconds": 80.644316059,
+    "download_gbps": 0.3667367066311596,
+    "host_to_hbm_seconds": 2.997185669000004,
+    "host_to_hbm_gbps": 9.867667253950145,
+    "seconds": 84.211
+  },
+  "finished": "2026-09-25T15:04:15Z"
+}

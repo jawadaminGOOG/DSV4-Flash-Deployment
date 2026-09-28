@@ -1,0 +1,469 @@
+{
+  "stage": "dspark_verify",
+  "timestamp_utc": "2026-09-26T08:58:23Z",
+  "status": "PASS",
+  "num_prompts": 4,
+  "max_new_tokens": 64,
+  "exact_token_sequence_matches": 4,
+  "greedy_equivalence_rate": 1.0,
+  "acceptance_histogram": [
+    34,
+    22,
+    14,
+    3,
+    1,
+    20
+  ],
+  "mean_accepted_length": 1.7340425531914894,
+  "mean_base_tok_per_s": 21.99091586817556,
+  "mean_dspark_tok_per_s": 34.6389165127563,
+  "dspark_speedup": 1.5751466069171072,
+  "per_prompt": [
+    {
+      "tokens_identical": true,
+      "base_tok_per_s": 22.028853983180124,
+      "dspark_tok_per_s": 16.097521540978246,
+      "dspark_stats": {
+        "max_draft_tokens": 5,
+        "histogram": [
+          12,
+          9,
+          7,
+          2,
+          1,
+          0
+        ],
+        "total_verify_steps": 31,
+        "total_accepted_draft_tokens": 33,
+        "total_emitted_tokens": 64,
+        "mean_accepted_length": 1.064516129032258,
+        "mean_tokens_per_step": 2.064516129032258
+      }
+    },
+    {
+      "tokens_identical": true,
+      "base_tok_per_s": 21.958831544988357,
+      "dspark_tok_per_s": 17.672656914619502,
+      "dspark_stats": {
+        "max_draft_tokens": 5,
+        "histogram": [
+          19,
+          11,
+          6,
+          1,
+          0,
+          0
+        ],
+        "total_verify_steps": 37,
+        "total_accepted_draft_tokens": 26,
+        "total_emitted_tokens": 63,
+        "mean_accepted_length": 0.7027027027027027,
+        "mean_tokens_per_step": 1.7027027027027026
+      }
+    },
+    {
+      "tokens_identical": true,
+      "base_tok_per_s": 22.032916961810002,
+      "dspark_tok_per_s": 51.439361895014294,
+      "dspark_stats": {
+        "max_draft_tokens": 5,
+        "histogram": [
+          2,
+          1,
+          0,
+          0,
+          0,
+          10
+        ],
+        "total_verify_steps": 13,
+        "total_accepted_draft_tokens": 51,
+        "total_emitted_tokens": 64,
+        "mean_accepted_length": 3.923076923076923,
+        "mean_tokens_per_step": 4.923076923076923
+      }
+    },
+    {
+      "tokens_identical": true,
+      "base_tok_per_s": 21.943060982723747,
+      "dspark_tok_per_s": 53.34612570041318,
+      "dspark_stats": {
+        "max_draft_tokens": 5,
+        "histogram": [
+          1,
+          1,
+          1,
+          0,
+          0,
+          10
+        ],
+        "total_verify_steps": 13,
+        "total_accepted_draft_tokens": 53,
+        "total_emitted_tokens": 66,
+        "mean_accepted_length": 4.076923076923077,
+        "mean_tokens_per_step": 5.076923076923077
+      }
+    }
+  ],
+  "hardware": {
+    "backend": "tpu",
+    "device_kind": "TPU7x",
+    "world_size": 32,
+    "local_device_count": 8,
+    "process_index": 0,
+    "process_count": 4,
+    "devices": [
+      {
+        "id": 0,
+        "process_index": 0,
+        "device_kind": "TPU7x",
+        "coords": [
+          0,
+          0,
+          0
+        ],
+        "core_on_chip": 0
+      },
+      {
+        "id": 1,
+        "process_index": 0,
+        "device_kind": "TPU7x",
+        "coords": [
+          0,
+          0,
+          0
+        ],
+        "core_on_chip": 1
+      },
+      {
+        "id": 2,
+        "process_index": 0,
+        "device_kind": "TPU7x",
+        "coords": [
+          1,
+          0,
+          0
+        ],
+        "core_on_chip": 0
+      },
+      {
+        "id": 3,
+        "process_index": 0,
+        "device_kind": "TPU7x",
+        "coords": [
+          1,
+          0,
+          0
+        ],
+        "core_on_chip": 1
+      },
+      {
+        "id": 4,
+        "process_index": 0,
+        "device_kind": "TPU7x",
+        "coords": [
+          0,
+          1,
+          0
+        ],
+        "core_on_chip": 0
+      },
+      {
+        "id": 5,
+        "process_index": 0,
+        "device_kind": "TPU7x",
+        "coords": [
+          0,
+          1,
+          0
+        ],
+        "core_on_chip": 1
+      },
+      {
+        "id": 6,
+        "process_index": 0,
+        "device_kind": "TPU7x",
+        "coords": [
+          1,
+          1,
+          0
+        ],
+        "core_on_chip": 0
+      },
+      {
+        "id": 7,
+        "process_index": 0,
+        "device_kind": "TPU7x",
+        "coords": [
+          1,
+          1,
+          0
+        ],
+        "core_on_chip": 1
+      },
+      {
+        "id": 8,
+        "process_index": 1,
+        "device_kind": "TPU7x",
+        "coords": [
+          0,
+          0,
+          1
+        ],
+        "core_on_chip": 0
+      },
+      {
+        "id": 9,
+        "process_index": 1,
+        "device_kind": "TPU7x",
+        "coords": [
+          0,
+          0,
+          1
+        ],
+        "core_on_chip": 1
+      },
+      {
+        "id": 10,
+        "process_index": 1,
+        "device_kind": "TPU7x",
+        "coords": [
+          1,
+          0,
+          1
+        ],
+        "core_on_chip": 0
+      },
+      {
+        "id": 11,
+        "process_index": 1,
+        "device_kind": "TPU7x",
+        "coords": [
+          1,
+          0,
+          1
+        ],
+        "core_on_chip": 1
+      },
+      {
+        "id": 12,
+        "process_index": 1,
+        "device_kind": "TPU7x",
+        "coords": [
+          0,
+          1,
+          1
+        ],
+        "core_on_chip": 0
+      },
+      {
+        "id": 13,
+        "process_index": 1,
+        "device_kind": "TPU7x",
+        "coords": [
+          0,
+          1,
+          1
+        ],
+        "core_on_chip": 1
+      },
+      {
+        "id": 14,
+        "process_index": 1,
+        "device_kind": "TPU7x",
+        "coords": [
+          1,
+          1,
+          1
+        ],
+        "core_on_chip": 0
+      },
+      {
+        "id": 15,
+        "process_index": 1,
+        "device_kind": "TPU7x",
+        "coords": [
+          1,
+          1,
+          1
+        ],
+        "core_on_chip": 1
+      },
+      {
+        "id": 16,
+        "process_index": 2,
+        "device_kind": "TPU7x",
+        "coords": [
+          0,
+          0,
+          2
+        ],
+        "core_on_chip": 0
+      },
+      {
+        "id": 17,
+        "process_index": 2,
+        "device_kind": "TPU7x",
+        "coords": [
+          0,
+          0,
+          2
+        ],
+        "core_on_chip": 1
+      },
+      {
+        "id": 18,
+        "process_index": 2,
+        "device_kind": "TPU7x",
+        "coords": [
+          1,
+          0,
+          2
+        ],
+        "core_on_chip": 0
+      },
+      {
+        "id": 19,
+        "process_index": 2,
+        "device_kind": "TPU7x",
+        "coords": [
+          1,
+          0,
+          2
+        ],
+        "core_on_chip": 1
+      },
+      {
+        "id": 20,
+        "process_index": 2,
+        "device_kind": "TPU7x",
+        "coords": [
+          0,
+          1,
+          2
+        ],
+        "core_on_chip": 0
+      },
+      {
+        "id": 21,
+        "process_index": 2,
+        "device_kind": "TPU7x",
+        "coords": [
+          0,
+          1,
+          2
+        ],
+        "core_on_chip": 1
+      },
+      {
+        "id": 22,
+        "process_index": 2,
+        "device_kind": "TPU7x",
+        "coords": [
+          1,
+          1,
+          2
+        ],
+        "core_on_chip": 0
+      },
+      {
+        "id": 23,
+        "process_index": 2,
+        "device_kind": "TPU7x",
+        "coords": [
+          1,
+          1,
+          2
+        ],
+        "core_on_chip": 1
+      },
+      {
+        "id": 24,
+        "process_index": 3,
+        "device_kind": "TPU7x",
+        "coords": [
+          0,
+          0,
+          3
+        ],
+        "core_on_chip": 0
+      },
+      {
+        "id": 25,
+        "process_index": 3,
+        "device_kind": "TPU7x",
+        "coords": [
+          0,
+          0,
+          3
+        ],
+        "core_on_chip": 1
+      },
+      {
+        "id": 26,
+        "process_index": 3,
+        "device_kind": "TPU7x",
+        "coords": [
+          1,
+          0,
+          3
+        ],
+        "core_on_chip": 0
+      },
+      {
+        "id": 27,
+        "process_index": 3,
+        "device_kind": "TPU7x",
+        "coords": [
+          1,
+          0,
+          3
+        ],
+        "core_on_chip": 1
+      },
+      {
+        "id": 28,
+        "process_index": 3,
+        "device_kind": "TPU7x",
+        "coords": [
+          0,
+          1,
+          3
+        ],
+        "core_on_chip": 0
+      },
+      {
+        "id": 29,
+        "process_index": 3,
+        "device_kind": "TPU7x",
+        "coords": [
+          0,
+          1,
+          3
+        ],
+        "core_on_chip": 1
+      },
+      {
+        "id": 30,
+        "process_index": 3,
+        "device_kind": "TPU7x",
+        "coords": [
+          1,
+          1,
+          3
+        ],
+        "core_on_chip": 0
+      },
+      {
+        "id": 31,
+        "process_index": 3,
+        "device_kind": "TPU7x",
+        "coords": [
+          1,
+          1,
+          3
+        ],
+        "core_on_chip": 1
+      }
+    ]
+  }
+}

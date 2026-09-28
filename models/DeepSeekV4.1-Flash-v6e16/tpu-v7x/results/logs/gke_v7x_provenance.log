@@ -1,0 +1,19 @@
+=== GKE TPU v7x Nodes & Pods (2026-09-26 UTC) ===
+NAME                                                  STATUS   ROLES    AGE    VERSION               INTERNAL-IP    EXTERNAL-IP      OS-IMAGE                             KERNEL-VERSION      CONTAINER-RUNTIME
+gke-dsv41-gke-jawadamin--default-pool-ca6d141b-20p8   Ready    <none>   19h    v1.36.4-gke.1247000   10.128.1.22    34.70.245.111    Container-Optimized OS from Google   6.12.105+ (amd64)   containerd://2.2.7
+gke-tpu-ccc38ca2-6jpj                                 Ready    <none>   161m   v1.36.4-gke.1247000   10.128.0.19    34.135.230.102   Container-Optimized OS from Google   6.12.105+ (amd64)   containerd://2.2.7
+gke-tpu-ccc38ca2-7292                                 Ready    <none>   161m   v1.36.4-gke.1247000   10.128.0.107   136.112.127.24   Container-Optimized OS from Google   6.12.105+ (amd64)   containerd://2.2.7
+gke-tpu-ccc38ca2-d049                                 Ready    <none>   161m   v1.36.4-gke.1247000   10.128.0.180   34.66.105.96     Container-Optimized OS from Google   6.12.105+ (amd64)   containerd://2.2.7
+gke-tpu-ccc38ca2-r865                                 Ready    <none>   161m   v1.36.4-gke.1247000   10.128.0.40    34.56.48.253     Container-Optimized OS from Google   6.12.105+ (amd64)   containerd://2.2.7
+
+NAME                          READY   STATUS    RESTARTS   AGE    IP            NODE                    NOMINATED NODE   READINESS GATES
+v7x16-flex-0925-w-0-0-452bk   0/1     Pending   0          10h    <none>        <none>                  <none>           <none>
+v7x16-spot-0925-w-0-0-6pfh5   1/1     Running   0          5h5m   10.126.69.5   gke-tpu-ccc38ca2-7292   <none>           <none>
+v7x16-spot-0925-w-0-1-qj889   1/1     Running   0          160m   10.126.68.2   gke-tpu-ccc38ca2-d049   <none>           <none>
+v7x16-spot-0925-w-0-2-8pdzf   1/1     Running   0          160m   10.126.67.4   gke-tpu-ccc38ca2-r865   <none>           <none>
+v7x16-spot-0925-w-0-3-z4mcd   1/1     Running   0          160m   10.126.66.4   gke-tpu-ccc38ca2-6jpj   <none>           <none>
+v7x4-flex-0925-w-0-0-fmw8t    0/1     Pending   0          10h    <none>        <none>                  <none>           <none>
+v7x4-spot-0925-w-0-0-56q56    0/1     Pending   0          162m   <none>        <none>                  <none>           <none>
+
+=== dspark_verify_w2.log ===
+[runner] starting stage=dspark_verify

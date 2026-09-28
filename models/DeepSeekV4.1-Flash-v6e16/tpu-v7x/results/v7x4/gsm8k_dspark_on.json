@@ -1,0 +1,947 @@
+{
+  "stage": "gsm8k_dspark_on",
+  "timestamp_utc": "2026-09-26T02:59:12Z",
+  "status": "PASS",
+  "task": "gsm8k",
+  "use_dspark": true,
+  "num_samples": 100,
+  "correct": 99,
+  "exact_match": 0.99,
+  "total_generated_tokens": 16338,
+  "total_decode_s": 1328.0487156379988,
+  "wall_elapsed_s": 1843.6084130329998,
+  "tok_per_s": 12.302259553898347,
+  "cumulative_dspark_histogram": [
+    600,
+    585,
+    482,
+    438,
+    395,
+    1565
+  ],
+  "hardware": {
+    "backend": "tpu",
+    "device_kind": "TPU7x",
+    "world_size": 8,
+    "local_device_count": 8,
+    "process_index": 0,
+    "process_count": 1,
+    "devices": [
+      {
+        "id": 0,
+        "process_index": 0,
+        "device_kind": "TPU7x",
+        "coords": [
+          0,
+          0,
+          0
+        ],
+        "core_on_chip": 0
+      },
+      {
+        "id": 1,
+        "process_index": 0,
+        "device_kind": "TPU7x",
+        "coords": [
+          0,
+          0,
+          0
+        ],
+        "core_on_chip": 1
+      },
+      {
+        "id": 2,
+        "process_index": 0,
+        "device_kind": "TPU7x",
+        "coords": [
+          1,
+          0,
+          0
+        ],
+        "core_on_chip": 0
+      },
+      {
+        "id": 3,
+        "process_index": 0,
+        "device_kind": "TPU7x",
+        "coords": [
+          1,
+          0,
+          0
+        ],
+        "core_on_chip": 1
+      },
+      {
+        "id": 4,
+        "process_index": 0,
+        "device_kind": "TPU7x",
+        "coords": [
+          0,
+          1,
+          0
+        ],
+        "core_on_chip": 0
+      },
+      {
+        "id": 5,
+        "process_index": 0,
+        "device_kind": "TPU7x",
+        "coords": [
+          0,
+          1,
+          0
+        ],
+        "core_on_chip": 1
+      },
+      {
+        "id": 6,
+        "process_index": 0,
+        "device_kind": "TPU7x",
+        "coords": [
+          1,
+          1,
+          0
+        ],
+        "core_on_chip": 0
+      },
+      {
+        "id": 7,
+        "process_index": 0,
+        "device_kind": "TPU7x",
+        "coords": [
+          1,
+          1,
+          0
+        ],
+        "core_on_chip": 1
+      }
+    ]
+  },
+  "sample_predictions": [
+    {
+      "index": 0,
+      "gold": "18",
+      "pred": "18",
+      "correct": true,
+      "metrics": {
+        "prefill_s": 34.24998036099987,
+        "decode_s": 9.436104344999876,
+        "tok_per_s": 11.445401200679646,
+        "median_step_ms": 325.8421330001511,
+        "p99_step_ms": 329.74251099974936,
+        "use_dspark": true,
+        "backend": "megakernel",
+        "dspark_stats": {
+          "max_draft_tokens": 5,
+          "histogram": [
+            4,
+            4,
+            7,
+            3,
+            2,
+            9
+          ],
+          "total_verify_steps": 29,
+          "total_accepted_draft_tokens": 80,
+          "total_emitted_tokens": 109,
+          "mean_accepted_length": 2.7586206896551726,
+          "mean_tokens_per_step": 3.7586206896551726
+        },
+        "device_kind": "TPU7x",
+        "world_size": 8
+      }
+    },
+    {
+      "index": 1,
+      "gold": "3",
+      "pred": "3",
+      "correct": true,
+      "metrics": {
+        "prefill_s": 2.935153794999678,
+        "decode_s": 5.551725235000049,
+        "tok_per_s": 12.248444784569639,
+        "median_step_ms": 326.12220300052286,
+        "p99_step_ms": 329.6161263998147,
+        "use_dspark": true,
+        "backend": "megakernel",
+        "dspark_stats": {
+          "max_draft_tokens": 5,
+          "histogram": [
+            0,
+            4,
+            3,
+            3,
+            2,
+            5
+          ],
+          "total_verify_steps": 17,
+          "total_accepted_draft_tokens": 52,
+          "total_emitted_tokens": 69,
+          "mean_accepted_length": 3.0588235294117645,
+          "mean_tokens_per_step": 4.0588235294117645
+        },
+        "device_kind": "TPU7x",
+        "world_size": 8
+      }
+    },
+    {
+      "index": 2,
+      "gold": "70000",
+      "pred": "70000",
+      "correct": true,
+      "metrics": {
+        "prefill_s": 4.1229869450007754,
+        "decode_s": 17.968634464000388,
+        "tok_per_s": 12.688777238848676,
+        "median_step_ms": 326.17199899959815,
+        "p99_step_ms": 331.8897632597691,
+        "use_dspark": true,
+        "backend": "megakernel",
+        "dspark_stats": {
+          "max_draft_tokens": 5,
+          "histogram": [
+            8,
+            6,
+            8,
+            4,
+            5,
+            24
+          ],
+          "total_verify_steps": 55,
+          "total_accepted_draft_tokens": 174,
+          "total_emitted_tokens": 229,
+          "mean_accepted_length": 3.1636363636363636,
+          "mean_tokens_per_step": 4.163636363636364
+        },
+        "device_kind": "TPU7x",
+        "world_size": 8
+      }
+    },
+    {
+      "index": 3,
+      "gold": "540",
+      "pred": "540",
+      "correct": true,
+      "metrics": {
+        "prefill_s": 3.3369614749999528,
+        "decode_s": 9.45768687799955,
+        "tok_per_s": 12.582357772577303,
+        "median_step_ms": 326.709879000191,
+        "p99_step_ms": 330.2496235998842,
+        "use_dspark": true,
+        "backend": "megakernel",
+        "dspark_stats": {
+          "max_draft_tokens": 5,
+          "histogram": [
+            4,
+            4,
+            4,
+            2,
+            2,
+            13
+          ],
+          "total_verify_steps": 29,
+          "total_accepted_draft_tokens": 91,
+          "total_emitted_tokens": 120,
+          "mean_accepted_length": 3.1379310344827585,
+          "mean_tokens_per_step": 4.137931034482759
+        },
+        "device_kind": "TPU7x",
+        "world_size": 8
+      }
+    },
+    {
+      "index": 4,
+      "gold": "20",
+      "pred": "20",
+      "correct": true,
+      "metrics": {
+        "prefill_s": 7.148309343000619,
+        "decode_s": 13.005346188000658,
+        "tok_per_s": 12.687090186975318,
+        "median_step_ms": 324.86808149951685,
+        "p99_step_ms": 333.2123090602545,
+        "use_dspark": true,
+        "backend": "megakernel",
+        "dspark_stats": {
+          "max_draft_tokens": 5,
+          "histogram": [
+            7,
+            3,
+            4,
+            4,
+            7,
+            15
+          ],
+          "total_verify_steps": 40,
+          "total_accepted_draft_tokens": 126,
+          "total_emitted_tokens": 166,
+          "mean_accepted_length": 3.15,
+          "mean_tokens_per_step": 4.15
+        },
+        "device_kind": "TPU7x",
+        "world_size": 8
+      }
+    },
+    {
+      "index": 5,
+      "gold": "64",
+      "pred": "64",
+      "correct": true,
+      "metrics": {
+        "prefill_s": 4.403806225999688,
+        "decode_s": 14.9811281530001,
+        "tok_per_s": 11.547861965612734,
+        "median_step_ms": 325.2438180002173,
+        "p99_step_ms": 330.76435345010395,
+        "use_dspark": true,
+        "backend": "megakernel",
+        "dspark_stats": {
+          "max_draft_tokens": 5,
+          "histogram": [
+            7,
+            9,
+            6,
+            5,
+            3,
+            16
+          ],
+          "total_verify_steps": 46,
+          "total_accepted_draft_tokens": 128,
+          "total_emitted_tokens": 174,
+          "mean_accepted_length": 2.782608695652174,
+          "mean_tokens_per_step": 3.782608695652174
+        },
+        "device_kind": "TPU7x",
+        "world_size": 8
+      }
+    },
+    {
+      "index": 6,
+      "gold": "260",
+      "pred": "260",
+      "correct": true,
+      "metrics": {
+        "prefill_s": 3.609611249000409,
+        "decode_s": 7.166822404999948,
+        "tok_per_s": 13.25552589857997,
+        "median_step_ms": 326.041851500122,
+        "p99_step_ms": 329.05823860018245,
+        "use_dspark": true,
+        "backend": "megakernel",
+        "dspark_stats": {
+          "max_draft_tokens": 5,
+          "histogram": [
+            2,
+            2,
+            4,
+            2,
+            2,
+            10
+          ],
+          "total_verify_steps": 22,
+          "total_accepted_draft_tokens": 74,
+          "total_emitted_tokens": 96,
+          "mean_accepted_length": 3.3636363636363638,
+          "mean_tokens_per_step": 4.363636363636363
+        },
+        "device_kind": "TPU7x",
+        "world_size": 8
+      }
+    },
+    {
+      "index": 7,
+      "gold": "160",
+      "pred": "160",
+      "correct": true,
+      "metrics": {
+        "prefill_s": 4.9097451899997395,
+        "decode_s": 32.711361568999564,
+        "tok_per_s": 9.660252121680928,
+        "median_step_ms": 326.80516649998026,
+        "p99_step_ms": 331.8939613695511,
+        "use_dspark": true,
+        "backend": "megakernel",
+        "dspark_stats": {
+          "max_draft_tokens": 5,
+          "histogram": [
+            25,
+            23,
+            15,
+            7,
+            7,
+            23
+          ],
+          "total_verify_steps": 100,
+          "total_accepted_draft_tokens": 217,
+          "total_emitted_tokens": 317,
+          "mean_accepted_length": 2.17,
+          "mean_tokens_per_step": 3.17
+        },
+        "device_kind": "TPU7x",
+        "world_size": 8
+      }
+    },
+    {
+      "index": 8,
+      "gold": "45",
+      "pred": "45",
+      "correct": true,
+      "metrics": {
+        "prefill_s": 6.834655100999953,
+        "decode_s": 26.059167661000174,
+        "tok_per_s": 12.663489651431727,
+        "median_step_ms": 325.5335164999451,
+        "p99_step_ms": 331.0729219100176,
+        "use_dspark": true,
+        "backend": "megakernel",
+        "dspark_stats": {
+          "max_draft_tokens": 5,
+          "histogram": [
+            10,
+            11,
+            10,
+            8,
+            9,
+            32
+          ],
+          "total_verify_steps": 80,
+          "total_accepted_draft_tokens": 251,
+          "total_emitted_tokens": 331,
+          "mean_accepted_length": 3.1375,
+          "mean_tokens_per_step": 4.1375
+        },
+        "device_kind": "TPU7x",
+        "world_size": 8
+      }
+    },
+    {
+      "index": 9,
+      "gold": "460",
+      "pred": "460",
+      "correct": true,
+      "metrics": {
+        "prefill_s": 4.425624672000595,
+        "decode_s": 12.713331021999693,
+        "tok_per_s": 13.529105763262502,
+        "median_step_ms": 326.0076010001285,
+        "p99_step_ms": 330.57036984013394,
+        "use_dspark": true,
+        "backend": "megakernel",
+        "dspark_stats": {
+          "max_draft_tokens": 5,
+          "histogram": [
+            5,
+            6,
+            1,
+            3,
+            3,
+            21
+          ],
+          "total_verify_steps": 39,
+          "total_accepted_draft_tokens": 134,
+          "total_emitted_tokens": 173,
+          "mean_accepted_length": 3.4358974358974357,
+          "mean_tokens_per_step": 4.435897435897436
+        },
+        "device_kind": "TPU7x",
+        "world_size": 8
+      }
+    },
+    {
+      "index": 10,
+      "gold": "366",
+      "pred": "366",
+      "correct": true,
+      "metrics": {
+        "prefill_s": 4.602836615999877,
+        "decode_s": 9.789434007999262,
+        "tok_per_s": 12.15596324596103,
+        "median_step_ms": 326.5398405005726,
+        "p99_step_ms": 329.88050405947433,
+        "use_dspark": true,
+        "backend": "megakernel",
+        "dspark_stats": {
+          "max_draft_tokens": 5,
+          "histogram": [
+            5,
+            3,
+            4,
+            3,
+            5,
+            10
+          ],
+          "total_verify_steps": 30,
+          "total_accepted_draft_tokens": 90,
+          "total_emitted_tokens": 120,
+          "mean_accepted_length": 3.0,
+          "mean_tokens_per_step": 4.0
+        },
+        "device_kind": "TPU7x",
+        "world_size": 8
+      }
+    },
+    {
+      "index": 11,
+      "gold": "694",
+      "pred": "694",
+      "correct": true,
+      "metrics": {
+        "prefill_s": 4.7373924309995346,
+        "decode_s": 10.703163099999983,
+        "tok_per_s": 15.509433842038739,
+        "median_step_ms": 324.2817259997537,
+        "p99_step_ms": 328.37718328002666,
+        "use_dspark": true,
+        "backend": "megakernel",
+        "dspark_stats": {
+          "max_draft_tokens": 5,
+          "histogram": [
+            0,
+            3,
+            3,
+            4,
+            2,
+            21
+          ],
+          "total_verify_steps": 33,
+          "total_accepted_draft_tokens": 134,
+          "total_emitted_tokens": 167,
+          "mean_accepted_length": 4.0606060606060606,
+          "mean_tokens_per_step": 5.0606060606060606
+        },
+        "device_kind": "TPU7x",
+        "world_size": 8
+      }
+    },
+    {
+      "index": 12,
+      "gold": "13",
+      "pred": "13",
+      "correct": true,
+      "metrics": {
+        "prefill_s": 5.022810123999989,
+        "decode_s": 44.40673980700012,
+        "tok_per_s": 9.908405839120844,
+        "median_step_ms": 326.1226284998884,
+        "p99_step_ms": 333.1507668501672,
+        "use_dspark": true,
+        "backend": "megakernel",
+        "dspark_stats": {
+          "max_draft_tokens": 5,
+          "histogram": [
+            29,
+            29,
+            24,
+            16,
+            10,
+            28
+          ],
+          "total_verify_steps": 136,
+          "total_accepted_draft_tokens": 305,
+          "total_emitted_tokens": 441,
+          "mean_accepted_length": 2.2426470588235294,
+          "mean_tokens_per_step": 3.2426470588235294
+        },
+        "device_kind": "TPU7x",
+        "world_size": 8
+      }
+    },
+    {
+      "index": 13,
+      "gold": "18",
+      "pred": "18",
+      "correct": true,
+      "metrics": {
+        "prefill_s": 4.543372686000112,
+        "decode_s": 25.11514230499961,
+        "tok_per_s": 13.179300199868216,
+        "median_step_ms": 325.3698920007082,
+        "p99_step_ms": 332.23209619991394,
+        "use_dspark": true,
+        "backend": "megakernel",
+        "dspark_stats": {
+          "max_draft_tokens": 5,
+          "histogram": [
+            12,
+            11,
+            5,
+            3,
+            5,
+            41
+          ],
+          "total_verify_steps": 77,
+          "total_accepted_draft_tokens": 255,
+          "total_emitted_tokens": 332,
+          "mean_accepted_length": 3.311688311688312,
+          "mean_tokens_per_step": 4.311688311688312
+        },
+        "device_kind": "TPU7x",
+        "world_size": 8
+      }
+    },
+    {
+      "index": 14,
+      "gold": "60",
+      "pred": "60",
+      "correct": true,
+      "metrics": {
+        "prefill_s": 4.12018383800023,
+        "decode_s": 13.378695407000123,
+        "tok_per_s": 15.023886401870765,
+        "median_step_ms": 326.5047790000608,
+        "p99_step_ms": 330.9937779999018,
+        "use_dspark": true,
+        "backend": "megakernel",
+        "dspark_stats": {
+          "max_draft_tokens": 5,
+          "histogram": [
+            1,
+            2,
+            6,
+            5,
+            3,
+            24
+          ],
+          "total_verify_steps": 41,
+          "total_accepted_draft_tokens": 161,
+          "total_emitted_tokens": 202,
+          "mean_accepted_length": 3.926829268292683,
+          "mean_tokens_per_step": 4.926829268292683
+        },
+        "device_kind": "TPU7x",
+        "world_size": 8
+      }
+    },
+    {
+      "index": 15,
+      "gold": "125",
+      "pred": "125",
+      "correct": true,
+      "metrics": {
+        "prefill_s": 35.73829223199999,
+        "decode_s": 16.04602349700002,
+        "tok_per_s": 12.588788744935224,
+        "median_step_ms": 326.9604199999776,
+        "p99_step_ms": 333.16020432000414,
+        "use_dspark": true,
+        "backend": "megakernel",
+        "dspark_stats": {
+          "max_draft_tokens": 5,
+          "histogram": [
+            10,
+            4,
+            4,
+            3,
+            7,
+            21
+          ],
+          "total_verify_steps": 49,
+          "total_accepted_draft_tokens": 154,
+          "total_emitted_tokens": 203,
+          "mean_accepted_length": 3.142857142857143,
+          "mean_tokens_per_step": 4.142857142857143
+        },
+        "device_kind": "TPU7x",
+        "world_size": 8
+      }
+    },
+    {
+      "index": 16,
+      "gold": "230",
+      "pred": "230",
+      "correct": true,
+      "metrics": {
+        "prefill_s": 4.120135892999997,
+        "decode_s": 12.783008521999932,
+        "tok_per_s": 9.543919163476613,
+        "median_step_ms": 327.7866979999544,
+        "p99_step_ms": 334.655928219986,
+        "use_dspark": true,
+        "backend": "megakernel",
+        "dspark_stats": {
+          "max_draft_tokens": 5,
+          "histogram": [
+            11,
+            6,
+            7,
+            4,
+            3,
+            8
+          ],
+          "total_verify_steps": 39,
+          "total_accepted_draft_tokens": 84,
+          "total_emitted_tokens": 123,
+          "mean_accepted_length": 2.1538461538461537,
+          "mean_tokens_per_step": 3.1538461538461537
+        },
+        "device_kind": "TPU7x",
+        "world_size": 8
+      }
+    },
+    {
+      "index": 17,
+      "gold": "57500",
+      "pred": "57500",
+      "correct": true,
+      "metrics": {
+        "prefill_s": 4.2896666060000825,
+        "decode_s": 13.044704502000059,
+        "tok_per_s": 11.652237885242616,
+        "median_step_ms": 325.85246050001615,
+        "p99_step_ms": 330.8605175099865,
+        "use_dspark": true,
+        "backend": "megakernel",
+        "dspark_stats": {
+          "max_draft_tokens": 5,
+          "histogram": [
+            5,
+            9,
+            6,
+            3,
+            2,
+            15
+          ],
+          "total_verify_steps": 40,
+          "total_accepted_draft_tokens": 113,
+          "total_emitted_tokens": 153,
+          "mean_accepted_length": 2.825,
+          "mean_tokens_per_step": 3.825
+        },
+        "device_kind": "TPU7x",
+        "world_size": 8
+      }
+    },
+    {
+      "index": 18,
+      "gold": "7",
+      "pred": "7",
+      "correct": true,
+      "metrics": {
+        "prefill_s": 2.9880499449999434,
+        "decode_s": 7.519092236000006,
+        "tok_per_s": 12.767498653676567,
+        "median_step_ms": 326.84667199998785,
+        "p99_step_ms": 330.3617640200605,
+        "use_dspark": true,
+        "backend": "megakernel",
+        "dspark_stats": {
+          "max_draft_tokens": 5,
+          "histogram": [
+            3,
+            3,
+            1,
+            4,
+            3,
+            9
+          ],
+          "total_verify_steps": 23,
+          "total_accepted_draft_tokens": 74,
+          "total_emitted_tokens": 97,
+          "mean_accepted_length": 3.217391304347826,
+          "mean_tokens_per_step": 4.217391304347826
+        },
+        "device_kind": "TPU7x",
+        "world_size": 8
+      }
+    },
+    {
+      "index": 19,
+      "gold": "6",
+      "pred": "6",
+      "correct": true,
+      "metrics": {
+        "prefill_s": 4.933505885000045,
+        "decode_s": 19.291847824,
+        "tok_per_s": 11.507451335160397,
+        "median_step_ms": 326.71207500004584,
+        "p99_step_ms": 331.95379314007823,
+        "use_dspark": true,
+        "backend": "megakernel",
+        "dspark_stats": {
+          "max_draft_tokens": 5,
+          "histogram": [
+            11,
+            9,
+            8,
+            6,
+            4,
+            21
+          ],
+          "total_verify_steps": 59,
+          "total_accepted_draft_tokens": 164,
+          "total_emitted_tokens": 223,
+          "mean_accepted_length": 2.7796610169491527,
+          "mean_tokens_per_step": 3.7796610169491527
+        },
+        "device_kind": "TPU7x",
+        "world_size": 8
+      }
+    },
+    {
+      "index": 20,
+      "gold": "15",
+      "pred": "15",
+      "correct": true,
+      "metrics": {
+        "prefill_s": 4.736313610000025,
+        "decode_s": 27.797439973999985,
+        "tok_per_s": 12.015494963291694,
+        "median_step_ms": 327.07723999999416,
+        "p99_step_ms": 333.5569325200822,
+        "use_dspark": true,
+        "backend": "megakernel",
+        "dspark_stats": {
+          "max_draft_tokens": 5,
+          "histogram": [
+            16,
+            11,
+            10,
+            7,
+            7,
+            34
+          ],
+          "total_verify_steps": 85,
+          "total_accepted_draft_tokens": 250,
+          "total_emitted_tokens": 335,
+          "mean_accepted_length": 2.9411764705882355,
+          "mean_tokens_per_step": 3.9411764705882355
+        },
+        "device_kind": "TPU7x",
+        "world_size": 8
+      }
+    },
+    {
+      "index": 21,
+      "gold": "14",
+      "pred": "14",
+      "correct": true,
+      "metrics": {
+        "prefill_s": 3.8252697540000327,
+        "decode_s": 8.528033004999998,
+        "tok_per_s": 11.843293751417654,
+        "median_step_ms": 327.46304849996477,
+        "p99_step_ms": 331.1408497499997,
+        "use_dspark": true,
+        "backend": "megakernel",
+        "dspark_stats": {
+          "max_draft_tokens": 5,
+          "histogram": [
+            5,
+            2,
+            4,
+            2,
+            5,
+            8
+          ],
+          "total_verify_steps": 26,
+          "total_accepted_draft_tokens": 76,
+          "total_emitted_tokens": 102,
+          "mean_accepted_length": 2.923076923076923,
+          "mean_tokens_per_step": 3.923076923076923
+        },
+        "device_kind": "TPU7x",
+        "world_size": 8
+      }
+    },
+    {
+      "index": 22,
+      "gold": "7",
+      "pred": "7",
+      "correct": true,
+      "metrics": {
+        "prefill_s": 4.437331132000054,
+        "decode_s": 8.487274562000039,
+        "tok_per_s": 14.374461331347636,
+        "median_step_ms": 326.2491374999854,
+        "p99_step_ms": 331.5105710000239,
+        "use_dspark": true,
+        "backend": "megakernel",
+        "dspark_stats": {
+          "max_draft_tokens": 5,
+          "histogram": [
+            2,
+            2,
+            2,
+            3,
+            3,
+            14
+          ],
+          "total_verify_steps": 26,
+          "total_accepted_draft_tokens": 97,
+          "total_emitted_tokens": 123,
+          "mean_accepted_length": 3.730769230769231,
+          "mean_tokens_per_step": 4.730769230769231
+        },
+        "device_kind": "TPU7x",
+        "world_size": 8
+      }
+    },
+    {
+      "index": 23,
+      "gold": "8",
+      "pred": "8",
+      "correct": true,
+      "metrics": {
+        "prefill_s": 3.4730188059999136,
+        "decode_s": 7.558833366000044,
+        "tok_per_s": 12.70037257757422,
+        "median_step_ms": 328.3853119999094,
+        "p99_step_ms": 331.83533311998417,
+        "use_dspark": true,
+        "backend": "megakernel",
+        "dspark_stats": {
+          "max_draft_tokens": 5,
+          "histogram": [
+            2,
+            1,
+            4,
+            4,
+            7,
+            5
+          ],
+          "total_verify_steps": 23,
+          "total_accepted_draft_tokens": 74,
+          "total_emitted_tokens": 97,
+          "mean_accepted_length": 3.217391304347826,
+          "mean_tokens_per_step": 4.217391304347826
+        },
+        "device_kind": "TPU7x",
+        "world_size": 8
+      }
+    },
+    {
+      "index": 24,
+      "gold": "26",
+      "pred": "26",
+      "correct": true,
+      "metrics": {
+        "prefill_s": 3.4683554650000588,
+        "decode_s": 7.191356963999965,
+        "tok_per_s": 11.541632603623931,
+        "median_step_ms": 326.5848655000241,
+        "p99_step_ms": 332.19620673005693,
+        "use_dspark": true,
+        "backend": "megakernel",
+        "dspark_stats": {
+          "max_draft_tokens": 5,
+          "histogram": [
+            3,
+            5,
+            2,
+            3,
+            1,
+            8
+          ],
+          "total_verify_steps": 22,
+          "total_accepted_draft_tokens": 62,
+          "total_emitted_tokens": 84,
+          "mean_accepted_length": 2.8181818181818183,
+          "mean_tokens_per_step": 3.8181818181818183
+        },
+        "device_kind": "TPU7x",
+        "world_size": 8
+      }
+    }
+  ]
+}

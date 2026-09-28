@@ -1,0 +1,1211 @@
+{
+  "stage": "gsm8k_dspark_on",
+  "timestamp_utc": "2026-09-26T03:42:49Z",
+  "status": "PASS",
+  "task": "gsm8k",
+  "use_dspark": true,
+  "num_samples": 100,
+  "correct": 99,
+  "exact_match": 0.99,
+  "total_generated_tokens": 15658,
+  "total_decode_s": 926.5836815380012,
+  "wall_elapsed_s": 1288.6100137600001,
+  "tok_per_s": 16.8986356137957,
+  "cumulative_dspark_histogram": [
+    528,
+    572,
+    485,
+    434,
+    343,
+    1512
+  ],
+  "hardware": {
+    "backend": "tpu",
+    "device_kind": "TPU7x",
+    "world_size": 32,
+    "local_device_count": 8,
+    "process_index": 0,
+    "process_count": 4,
+    "devices": [
+      {
+        "id": 0,
+        "process_index": 0,
+        "device_kind": "TPU7x",
+        "coords": [
+          0,
+          0,
+          0
+        ],
+        "core_on_chip": 0
+      },
+      {
+        "id": 1,
+        "process_index": 0,
+        "device_kind": "TPU7x",
+        "coords": [
+          0,
+          0,
+          0
+        ],
+        "core_on_chip": 1
+      },
+      {
+        "id": 2,
+        "process_index": 0,
+        "device_kind": "TPU7x",
+        "coords": [
+          1,
+          0,
+          0
+        ],
+        "core_on_chip": 0
+      },
+      {
+        "id": 3,
+        "process_index": 0,
+        "device_kind": "TPU7x",
+        "coords": [
+          1,
+          0,
+          0
+        ],
+        "core_on_chip": 1
+      },
+      {
+        "id": 4,
+        "process_index": 0,
+        "device_kind": "TPU7x",
+        "coords": [
+          0,
+          1,
+          0
+        ],
+        "core_on_chip": 0
+      },
+      {
+        "id": 5,
+        "process_index": 0,
+        "device_kind": "TPU7x",
+        "coords": [
+          0,
+          1,
+          0
+        ],
+        "core_on_chip": 1
+      },
+      {
+        "id": 6,
+        "process_index": 0,
+        "device_kind": "TPU7x",
+        "coords": [
+          1,
+          1,
+          0
+        ],
+        "core_on_chip": 0
+      },
+      {
+        "id": 7,
+        "process_index": 0,
+        "device_kind": "TPU7x",
+        "coords": [
+          1,
+          1,
+          0
+        ],
+        "core_on_chip": 1
+      },
+      {
+        "id": 8,
+        "process_index": 1,
+        "device_kind": "TPU7x",
+        "coords": [
+          0,
+          0,
+          1
+        ],
+        "core_on_chip": 0
+      },
+      {
+        "id": 9,
+        "process_index": 1,
+        "device_kind": "TPU7x",
+        "coords": [
+          0,
+          0,
+          1
+        ],
+        "core_on_chip": 1
+      },
+      {
+        "id": 10,
+        "process_index": 1,
+        "device_kind": "TPU7x",
+        "coords": [
+          1,
+          0,
+          1
+        ],
+        "core_on_chip": 0
+      },
+      {
+        "id": 11,
+        "process_index": 1,
+        "device_kind": "TPU7x",
+        "coords": [
+          1,
+          0,
+          1
+        ],
+        "core_on_chip": 1
+      },
+      {
+        "id": 12,
+        "process_index": 1,
+        "device_kind": "TPU7x",
+        "coords": [
+          0,
+          1,
+          1
+        ],
+        "core_on_chip": 0
+      },
+      {
+        "id": 13,
+        "process_index": 1,
+        "device_kind": "TPU7x",
+        "coords": [
+          0,
+          1,
+          1
+        ],
+        "core_on_chip": 1
+      },
+      {
+        "id": 14,
+        "process_index": 1,
+        "device_kind": "TPU7x",
+        "coords": [
+          1,
+          1,
+          1
+        ],
+        "core_on_chip": 0
+      },
+      {
+        "id": 15,
+        "process_index": 1,
+        "device_kind": "TPU7x",
+        "coords": [
+          1,
+          1,
+          1
+        ],
+        "core_on_chip": 1
+      },
+      {
+        "id": 16,
+        "process_index": 2,
+        "device_kind": "TPU7x",
+        "coords": [
+          0,
+          0,
+          2
+        ],
+        "core_on_chip": 0
+      },
+      {
+        "id": 17,
+        "process_index": 2,
+        "device_kind": "TPU7x",
+        "coords": [
+          0,
+          0,
+          2
+        ],
+        "core_on_chip": 1
+      },
+      {
+        "id": 18,
+        "process_index": 2,
+        "device_kind": "TPU7x",
+        "coords": [
+          1,
+          0,
+          2
+        ],
+        "core_on_chip": 0
+      },
+      {
+        "id": 19,
+        "process_index": 2,
+        "device_kind": "TPU7x",
+        "coords": [
+          1,
+          0,
+          2
+        ],
+        "core_on_chip": 1
+      },
+      {
+        "id": 20,
+        "process_index": 2,
+        "device_kind": "TPU7x",
+        "coords": [
+          0,
+          1,
+          2
+        ],
+        "core_on_chip": 0
+      },
+      {
+        "id": 21,
+        "process_index": 2,
+        "device_kind": "TPU7x",
+        "coords": [
+          0,
+          1,
+          2
+        ],
+        "core_on_chip": 1
+      },
+      {
+        "id": 22,
+        "process_index": 2,
+        "device_kind": "TPU7x",
+        "coords": [
+          1,
+          1,
+          2
+        ],
+        "core_on_chip": 0
+      },
+      {
+        "id": 23,
+        "process_index": 2,
+        "device_kind": "TPU7x",
+        "coords": [
+          1,
+          1,
+          2
+        ],
+        "core_on_chip": 1
+      },
+      {
+        "id": 24,
+        "process_index": 3,
+        "device_kind": "TPU7x",
+        "coords": [
+          0,
+          0,
+          3
+        ],
+        "core_on_chip": 0
+      },
+      {
+        "id": 25,
+        "process_index": 3,
+        "device_kind": "TPU7x",
+        "coords": [
+          0,
+          0,
+          3
+        ],
+        "core_on_chip": 1
+      },
+      {
+        "id": 26,
+        "process_index": 3,
+        "device_kind": "TPU7x",
+        "coords": [
+          1,
+          0,
+          3
+        ],
+        "core_on_chip": 0
+      },
+      {
+        "id": 27,
+        "process_index": 3,
+        "device_kind": "TPU7x",
+        "coords": [
+          1,
+          0,
+          3
+        ],
+        "core_on_chip": 1
+      },
+      {
+        "id": 28,
+        "process_index": 3,
+        "device_kind": "TPU7x",
+        "coords": [
+          0,
+          1,
+          3
+        ],
+        "core_on_chip": 0
+      },
+      {
+        "id": 29,
+        "process_index": 3,
+        "device_kind": "TPU7x",
+        "coords": [
+          0,
+          1,
+          3
+        ],
+        "core_on_chip": 1
+      },
+      {
+        "id": 30,
+        "process_index": 3,
+        "device_kind": "TPU7x",
+        "coords": [
+          1,
+          1,
+          3
+        ],
+        "core_on_chip": 0
+      },
+      {
+        "id": 31,
+        "process_index": 3,
+        "device_kind": "TPU7x",
+        "coords": [
+          1,
+          1,
+          3
+        ],
+        "core_on_chip": 1
+      }
+    ]
+  },
+  "sample_predictions": [
+    {
+      "index": 0,
+      "gold": "18",
+      "pred": "18",
+      "correct": true,
+      "metrics": {
+        "prefill_s": 25.280789428999924,
+        "decode_s": 7.166679117000058,
+        "tok_per_s": 15.488345185805407,
+        "median_step_ms": 238.50833250003234,
+        "p99_step_ms": 241.69788966992655,
+        "use_dspark": true,
+        "backend": "megakernel",
+        "dspark_stats": {
+          "max_draft_tokens": 5,
+          "histogram": [
+            5,
+            8,
+            3,
+            1,
+            0,
+            13
+          ],
+          "total_verify_steps": 30,
+          "total_accepted_draft_tokens": 82,
+          "total_emitted_tokens": 112,
+          "mean_accepted_length": 2.7333333333333334,
+          "mean_tokens_per_step": 3.7333333333333334
+        },
+        "device_kind": "TPU7x",
+        "world_size": 32
+      }
+    },
+    {
+      "index": 1,
+      "gold": "3",
+      "pred": "3",
+      "correct": true,
+      "metrics": {
+        "prefill_s": 2.17000505399983,
+        "decode_s": 3.8363752320001367,
+        "tok_per_s": 15.639763154429067,
+        "median_step_ms": 239.53991700022925,
+        "p99_step_ms": 243.70425955019073,
+        "use_dspark": true,
+        "backend": "megakernel",
+        "dspark_stats": {
+          "max_draft_tokens": 5,
+          "histogram": [
+            2,
+            3,
+            2,
+            2,
+            3,
+            4
+          ],
+          "total_verify_steps": 16,
+          "total_accepted_draft_tokens": 45,
+          "total_emitted_tokens": 61,
+          "mean_accepted_length": 2.8125,
+          "mean_tokens_per_step": 3.8125
+        },
+        "device_kind": "TPU7x",
+        "world_size": 32
+      }
+    },
+    {
+      "index": 2,
+      "gold": "70000",
+      "pred": "70000",
+      "correct": true,
+      "metrics": {
+        "prefill_s": 3.0418039039996074,
+        "decode_s": 15.583629457999905,
+        "tok_per_s": 15.978305995473672,
+        "median_step_ms": 239.35377899988453,
+        "p99_step_ms": 245.4777243200806,
+        "use_dspark": true,
+        "backend": "megakernel",
+        "dspark_stats": {
+          "max_draft_tokens": 5,
+          "histogram": [
+            11,
+            11,
+            9,
+            5,
+            4,
+            25
+          ],
+          "total_verify_steps": 65,
+          "total_accepted_draft_tokens": 185,
+          "total_emitted_tokens": 250,
+          "mean_accepted_length": 2.8461538461538463,
+          "mean_tokens_per_step": 3.8461538461538463
+        },
+        "device_kind": "TPU7x",
+        "world_size": 32
+      }
+    },
+    {
+      "index": 3,
+      "gold": "540",
+      "pred": "540",
+      "correct": true,
+      "metrics": {
+        "prefill_s": 2.5049667210000734,
+        "decode_s": 7.648093312999663,
+        "tok_per_s": 16.605445933058217,
+        "median_step_ms": 238.63548500003162,
+        "p99_step_ms": 243.44852589018046,
+        "use_dspark": true,
+        "backend": "megakernel",
+        "dspark_stats": {
+          "max_draft_tokens": 5,
+          "histogram": [
+            6,
+            4,
+            3,
+            3,
+            3,
+            13
+          ],
+          "total_verify_steps": 32,
+          "total_accepted_draft_tokens": 96,
+          "total_emitted_tokens": 128,
+          "mean_accepted_length": 3.0,
+          "mean_tokens_per_step": 4.0
+        },
+        "device_kind": "TPU7x",
+        "world_size": 32
+      }
+    },
+    {
+      "index": 4,
+      "gold": "20",
+      "pred": "20",
+      "correct": true,
+      "metrics": {
+        "prefill_s": 5.333765556000344,
+        "decode_s": 10.993990246000067,
+        "tok_per_s": 15.82682866789938,
+        "median_step_ms": 238.54516400001557,
+        "p99_step_ms": 243.79082759999164,
+        "use_dspark": true,
+        "backend": "megakernel",
+        "dspark_stats": {
+          "max_draft_tokens": 5,
+          "histogram": [
+            6,
+            10,
+            6,
+            5,
+            3,
+            16
+          ],
+          "total_verify_steps": 46,
+          "total_accepted_draft_tokens": 129,
+          "total_emitted_tokens": 175,
+          "mean_accepted_length": 2.8043478260869565,
+          "mean_tokens_per_step": 3.8043478260869565
+        },
+        "device_kind": "TPU7x",
+        "world_size": 32
+      }
+    },
+    {
+      "index": 5,
+      "gold": "64",
+      "pred": "64",
+      "correct": true,
+      "metrics": {
+        "prefill_s": 3.301652095999998,
+        "decode_s": 13.871533392999936,
+        "tok_per_s": 15.643548110514288,
+        "median_step_ms": 238.93925250013126,
+        "p99_step_ms": 244.7083720398632,
+        "use_dspark": true,
+        "backend": "megakernel",
+        "dspark_stats": {
+          "max_draft_tokens": 5,
+          "histogram": [
+            14,
+            7,
+            5,
+            6,
+            5,
+            21
+          ],
+          "total_verify_steps": 58,
+          "total_accepted_draft_tokens": 160,
+          "total_emitted_tokens": 218,
+          "mean_accepted_length": 2.7586206896551726,
+          "mean_tokens_per_step": 3.7586206896551726
+        },
+        "device_kind": "TPU7x",
+        "world_size": 32
+      }
+    },
+    {
+      "index": 6,
+      "gold": "260",
+      "pred": "260",
+      "correct": true,
+      "metrics": {
+        "prefill_s": 2.694572841000081,
+        "decode_s": 4.524881291999918,
+        "tok_per_s": 20.995025917688036,
+        "median_step_ms": 237.37049400006072,
+        "p99_step_ms": 242.81829998006287,
+        "use_dspark": true,
+        "backend": "megakernel",
+        "dspark_stats": {
+          "max_draft_tokens": 5,
+          "histogram": [
+            0,
+            2,
+            2,
+            2,
+            1,
+            12
+          ],
+          "total_verify_steps": 19,
+          "total_accepted_draft_tokens": 76,
+          "total_emitted_tokens": 95,
+          "mean_accepted_length": 4.0,
+          "mean_tokens_per_step": 5.0
+        },
+        "device_kind": "TPU7x",
+        "world_size": 32
+      }
+    },
+    {
+      "index": 7,
+      "gold": "160",
+      "pred": "160",
+      "correct": true,
+      "metrics": {
+        "prefill_s": 3.6611727730000894,
+        "decode_s": 16.053560208000363,
+        "tok_per_s": 16.25807587963756,
+        "median_step_ms": 239.14940799977558,
+        "p99_step_ms": 245.36652158022662,
+        "use_dspark": true,
+        "backend": "megakernel",
+        "dspark_stats": {
+          "max_draft_tokens": 5,
+          "histogram": [
+            11,
+            10,
+            7,
+            9,
+            6,
+            24
+          ],
+          "total_verify_steps": 67,
+          "total_accepted_draft_tokens": 195,
+          "total_emitted_tokens": 262,
+          "mean_accepted_length": 2.91044776119403,
+          "mean_tokens_per_step": 3.91044776119403
+        },
+        "device_kind": "TPU7x",
+        "world_size": 32
+      }
+    },
+    {
+      "index": 8,
+      "gold": "45",
+      "pred": "45",
+      "correct": true,
+      "metrics": {
+        "prefill_s": 5.072522950999883,
+        "decode_s": 17.485551965000013,
+        "tok_per_s": 16.470741133964527,
+        "median_step_ms": 239.12397100002636,
+        "p99_step_ms": 244.64638119992742,
+        "use_dspark": true,
+        "backend": "megakernel",
+        "dspark_stats": {
+          "max_draft_tokens": 5,
+          "histogram": [
+            11,
+            14,
+            6,
+            7,
+            7,
+            28
+          ],
+          "total_verify_steps": 73,
+          "total_accepted_draft_tokens": 215,
+          "total_emitted_tokens": 288,
+          "mean_accepted_length": 2.9452054794520546,
+          "mean_tokens_per_step": 3.9452054794520546
+        },
+        "device_kind": "TPU7x",
+        "world_size": 32
+      }
+    },
+    {
+      "index": 9,
+      "gold": "460",
+      "pred": "460",
+      "correct": true,
+      "metrics": {
+        "prefill_s": 3.266846386999987,
+        "decode_s": 8.115636823999921,
+        "tok_per_s": 17.86674331842938,
+        "median_step_ms": 238.55654650014912,
+        "p99_step_ms": 243.00742333997277,
+        "use_dspark": true,
+        "backend": "megakernel",
+        "dspark_stats": {
+          "max_draft_tokens": 5,
+          "histogram": [
+            2,
+            9,
+            3,
+            0,
+            3,
+            17
+          ],
+          "total_verify_steps": 34,
+          "total_accepted_draft_tokens": 112,
+          "total_emitted_tokens": 146,
+          "mean_accepted_length": 3.2941176470588234,
+          "mean_tokens_per_step": 4.294117647058823
+        },
+        "device_kind": "TPU7x",
+        "world_size": 32
+      }
+    },
+    {
+      "index": 10,
+      "gold": "366",
+      "pred": "366",
+      "correct": true,
+      "metrics": {
+        "prefill_s": 3.4242322850000164,
+        "decode_s": 7.6372272920002615,
+        "tok_per_s": 18.462197681047513,
+        "median_step_ms": 237.60701549986152,
+        "p99_step_ms": 241.89574524015825,
+        "use_dspark": true,
+        "backend": "megakernel",
+        "dspark_stats": {
+          "max_draft_tokens": 5,
+          "histogram": [
+            4,
+            3,
+            2,
+            6,
+            0,
+            17
+          ],
+          "total_verify_steps": 32,
+          "total_accepted_draft_tokens": 110,
+          "total_emitted_tokens": 142,
+          "mean_accepted_length": 3.4375,
+          "mean_tokens_per_step": 4.4375
+        },
+        "device_kind": "TPU7x",
+        "world_size": 32
+      }
+    },
+    {
+      "index": 11,
+      "gold": "694",
+      "pred": "694",
+      "correct": true,
+      "metrics": {
+        "prefill_s": 3.504982757000107,
+        "decode_s": 5.511984076000317,
+        "tok_per_s": 17.598018909805432,
+        "median_step_ms": 238.80581000003076,
+        "p99_step_ms": 245.0262602201019,
+        "use_dspark": true,
+        "backend": "megakernel",
+        "dspark_stats": {
+          "max_draft_tokens": 5,
+          "histogram": [
+            2,
+            4,
+            3,
+            2,
+            1,
+            11
+          ],
+          "total_verify_steps": 23,
+          "total_accepted_draft_tokens": 75,
+          "total_emitted_tokens": 98,
+          "mean_accepted_length": 3.260869565217391,
+          "mean_tokens_per_step": 4.260869565217392
+        },
+        "device_kind": "TPU7x",
+        "world_size": 32
+      }
+    },
+    {
+      "index": 12,
+      "gold": "13",
+      "pred": "13",
+      "correct": true,
+      "metrics": {
+        "prefill_s": 3.7701751479999075,
+        "decode_s": 20.85120740299999,
+        "tok_per_s": 13.524396671601231,
+        "median_step_ms": 239.45408100007626,
+        "p99_step_ms": 245.67458062017067,
+        "use_dspark": true,
+        "backend": "megakernel",
+        "dspark_stats": {
+          "max_draft_tokens": 5,
+          "histogram": [
+            25,
+            16,
+            8,
+            11,
+            5,
+            22
+          ],
+          "total_verify_steps": 87,
+          "total_accepted_draft_tokens": 195,
+          "total_emitted_tokens": 282,
+          "mean_accepted_length": 2.2413793103448274,
+          "mean_tokens_per_step": 3.2413793103448274
+        },
+        "device_kind": "TPU7x",
+        "world_size": 32
+      }
+    },
+    {
+      "index": 13,
+      "gold": "18",
+      "pred": "18",
+      "correct": true,
+      "metrics": {
+        "prefill_s": 3.373891054000069,
+        "decode_s": 19.587665039000058,
+        "tok_per_s": 17.20470506969644,
+        "median_step_ms": 238.22250600005646,
+        "p99_step_ms": 245.36965907973354,
+        "use_dspark": true,
+        "backend": "megakernel",
+        "dspark_stats": {
+          "max_draft_tokens": 5,
+          "histogram": [
+            15,
+            12,
+            7,
+            3,
+            4,
+            41
+          ],
+          "total_verify_steps": 82,
+          "total_accepted_draft_tokens": 256,
+          "total_emitted_tokens": 338,
+          "mean_accepted_length": 3.1219512195121952,
+          "mean_tokens_per_step": 4.121951219512195
+        },
+        "device_kind": "TPU7x",
+        "world_size": 32
+      }
+    },
+    {
+      "index": 14,
+      "gold": "60",
+      "pred": "60",
+      "correct": true,
+      "metrics": {
+        "prefill_s": 3.042202456999803,
+        "decode_s": 7.663245083999755,
+        "tok_per_s": 19.051981034096947,
+        "median_step_ms": 239.07844399991518,
+        "p99_step_ms": 245.17887153004722,
+        "use_dspark": true,
+        "backend": "megakernel",
+        "dspark_stats": {
+          "max_draft_tokens": 5,
+          "histogram": [
+            1,
+            4,
+            4,
+            3,
+            6,
+            14
+          ],
+          "total_verify_steps": 32,
+          "total_accepted_draft_tokens": 115,
+          "total_emitted_tokens": 147,
+          "mean_accepted_length": 3.59375,
+          "mean_tokens_per_step": 4.59375
+        },
+        "device_kind": "TPU7x",
+        "world_size": 32
+      }
+    },
+    {
+      "index": 15,
+      "gold": "125",
+      "pred": "125",
+      "correct": true,
+      "metrics": {
+        "prefill_s": 4.681089617999987,
+        "decode_s": 9.346954634999747,
+        "tok_per_s": 16.79691473114807,
+        "median_step_ms": 239.5997180001359,
+        "p99_step_ms": 243.0541834000178,
+        "use_dspark": true,
+        "backend": "megakernel",
+        "dspark_stats": {
+          "max_draft_tokens": 5,
+          "histogram": [
+            6,
+            4,
+            5,
+            6,
+            3,
+            15
+          ],
+          "total_verify_steps": 39,
+          "total_accepted_draft_tokens": 119,
+          "total_emitted_tokens": 158,
+          "mean_accepted_length": 3.051282051282051,
+          "mean_tokens_per_step": 4.051282051282051
+        },
+        "device_kind": "TPU7x",
+        "world_size": 32
+      }
+    },
+    {
+      "index": 16,
+      "gold": "230",
+      "pred": "230",
+      "correct": true,
+      "metrics": {
+        "prefill_s": 3.034473512999739,
+        "decode_s": 6.934738246000052,
+        "tok_per_s": 15.42956578955485,
+        "median_step_ms": 238.93179900005634,
+        "p99_step_ms": 243.59955928010095,
+        "use_dspark": true,
+        "backend": "megakernel",
+        "dspark_stats": {
+          "max_draft_tokens": 5,
+          "histogram": [
+            6,
+            0,
+            8,
+            5,
+            2,
+            8
+          ],
+          "total_verify_steps": 29,
+          "total_accepted_draft_tokens": 79,
+          "total_emitted_tokens": 108,
+          "mean_accepted_length": 2.7241379310344827,
+          "mean_tokens_per_step": 3.7241379310344827
+        },
+        "device_kind": "TPU7x",
+        "world_size": 32
+      }
+    },
+    {
+      "index": 17,
+      "gold": "57500",
+      "pred": "57500",
+      "correct": true,
+      "metrics": {
+        "prefill_s": 3.197985923000033,
+        "decode_s": 9.072360498999842,
+        "tok_per_s": 17.525758595850387,
+        "median_step_ms": 238.6979615000655,
+        "p99_step_ms": 243.6096911900131,
+        "use_dspark": true,
+        "backend": "megakernel",
+        "dspark_stats": {
+          "max_draft_tokens": 5,
+          "histogram": [
+            2,
+            7,
+            7,
+            2,
+            5,
+            15
+          ],
+          "total_verify_steps": 38,
+          "total_accepted_draft_tokens": 122,
+          "total_emitted_tokens": 160,
+          "mean_accepted_length": 3.210526315789474,
+          "mean_tokens_per_step": 4.2105263157894735
+        },
+        "device_kind": "TPU7x",
+        "world_size": 32
+      }
+    },
+    {
+      "index": 18,
+      "gold": "7",
+      "pred": "7",
+      "correct": true,
+      "metrics": {
+        "prefill_s": 2.221877227999812,
+        "decode_s": 7.89705736499991,
+        "tok_per_s": 16.841716332144376,
+        "median_step_ms": 239.25350800027445,
+        "p99_step_ms": 244.24095215974376,
+        "use_dspark": true,
+        "backend": "megakernel",
+        "dspark_stats": {
+          "max_draft_tokens": 5,
+          "histogram": [
+            3,
+            5,
+            5,
+            6,
+            2,
+            12
+          ],
+          "total_verify_steps": 33,
+          "total_accepted_draft_tokens": 101,
+          "total_emitted_tokens": 134,
+          "mean_accepted_length": 3.0606060606060606,
+          "mean_tokens_per_step": 4.0606060606060606
+        },
+        "device_kind": "TPU7x",
+        "world_size": 32
+      }
+    },
+    {
+      "index": 19,
+      "gold": "6",
+      "pred": "6",
+      "correct": true,
+      "metrics": {
+        "prefill_s": 3.6577327039999545,
+        "decode_s": 13.16300493000017,
+        "tok_per_s": 16.25768592643057,
+        "median_step_ms": 238.79744999976538,
+        "p99_step_ms": 245.42106618000616,
+        "use_dspark": true,
+        "backend": "megakernel",
+        "dspark_stats": {
+          "max_draft_tokens": 5,
+          "histogram": [
+            9,
+            9,
+            4,
+            8,
+            6,
+            19
+          ],
+          "total_verify_steps": 55,
+          "total_accepted_draft_tokens": 160,
+          "total_emitted_tokens": 215,
+          "mean_accepted_length": 2.909090909090909,
+          "mean_tokens_per_step": 3.909090909090909
+        },
+        "device_kind": "TPU7x",
+        "world_size": 32
+      }
+    },
+    {
+      "index": 20,
+      "gold": "15",
+      "pred": "15",
+      "correct": true,
+      "metrics": {
+        "prefill_s": 3.541182838000168,
+        "decode_s": 22.27356114799977,
+        "tok_per_s": 15.893282517680841,
+        "median_step_ms": 239.19528399983392,
+        "p99_step_ms": 244.0222957599326,
+        "use_dspark": true,
+        "backend": "megakernel",
+        "dspark_stats": {
+          "max_draft_tokens": 5,
+          "histogram": [
+            16,
+            18,
+            7,
+            11,
+            8,
+            33
+          ],
+          "total_verify_steps": 93,
+          "total_accepted_draft_tokens": 262,
+          "total_emitted_tokens": 355,
+          "mean_accepted_length": 2.817204301075269,
+          "mean_tokens_per_step": 3.817204301075269
+        },
+        "device_kind": "TPU7x",
+        "world_size": 32
+      }
+    },
+    {
+      "index": 21,
+      "gold": "14",
+      "pred": "14",
+      "correct": true,
+      "metrics": {
+        "prefill_s": 2.8113622040000337,
+        "decode_s": 5.754033537000396,
+        "tok_per_s": 15.641201849323494,
+        "median_step_ms": 239.52514799998426,
+        "p99_step_ms": 245.87463143986497,
+        "use_dspark": true,
+        "backend": "megakernel",
+        "dspark_stats": {
+          "max_draft_tokens": 5,
+          "histogram": [
+            6,
+            2,
+            2,
+            3,
+            3,
+            8
+          ],
+          "total_verify_steps": 24,
+          "total_accepted_draft_tokens": 67,
+          "total_emitted_tokens": 91,
+          "mean_accepted_length": 2.7916666666666665,
+          "mean_tokens_per_step": 3.7916666666666665
+        },
+        "device_kind": "TPU7x",
+        "world_size": 32
+      }
+    },
+    {
+      "index": 22,
+      "gold": "7",
+      "pred": "7",
+      "correct": true,
+      "metrics": {
+        "prefill_s": 3.273010660000182,
+        "decode_s": 6.6835589050001545,
+        "tok_per_s": 19.600335968011787,
+        "median_step_ms": 237.80797899985373,
+        "p99_step_ms": 243.66372419008258,
+        "use_dspark": true,
+        "backend": "megakernel",
+        "dspark_stats": {
+          "max_draft_tokens": 5,
+          "histogram": [
+            2,
+            2,
+            2,
+            4,
+            4,
+            14
+          ],
+          "total_verify_steps": 28,
+          "total_accepted_draft_tokens": 104,
+          "total_emitted_tokens": 132,
+          "mean_accepted_length": 3.7142857142857144,
+          "mean_tokens_per_step": 4.714285714285714
+        },
+        "device_kind": "TPU7x",
+        "world_size": 32
+      }
+    },
+    {
+      "index": 23,
+      "gold": "8",
+      "pred": "8",
+      "correct": true,
+      "metrics": {
+        "prefill_s": 2.605087506000018,
+        "decode_s": 6.2416149450000376,
+        "tok_per_s": 16.822569307020807,
+        "median_step_ms": 239.87604850003663,
+        "p99_step_ms": 243.26039050015424,
+        "use_dspark": true,
+        "backend": "megakernel",
+        "dspark_stats": {
+          "max_draft_tokens": 5,
+          "histogram": [
+            5,
+            0,
+            4,
+            4,
+            5,
+            8
+          ],
+          "total_verify_steps": 26,
+          "total_accepted_draft_tokens": 80,
+          "total_emitted_tokens": 106,
+          "mean_accepted_length": 3.076923076923077,
+          "mean_tokens_per_step": 4.076923076923077
+        },
+        "device_kind": "TPU7x",
+        "world_size": 32
+      }
+    },
+    {
+      "index": 24,
+      "gold": "26",
+      "pred": "26",
+      "correct": true,
+      "metrics": {
+        "prefill_s": 2.600214183999924,
+        "decode_s": 4.787078883999584,
+        "tok_per_s": 15.24938313508818,
+        "median_step_ms": 239.02608299999883,
+        "p99_step_ms": 243.3478782398879,
+        "use_dspark": true,
+        "backend": "megakernel",
+        "dspark_stats": {
+          "max_draft_tokens": 5,
+          "histogram": [
+            4,
+            3,
+            2,
+            3,
+            2,
+            6
+          ],
+          "total_verify_steps": 20,
+          "total_accepted_draft_tokens": 54,
+          "total_emitted_tokens": 74,
+          "mean_accepted_length": 2.7,
+          "mean_tokens_per_step": 3.7
+        },
+        "device_kind": "TPU7x",
+        "world_size": 32
+      }
+    }
+  ]
+}

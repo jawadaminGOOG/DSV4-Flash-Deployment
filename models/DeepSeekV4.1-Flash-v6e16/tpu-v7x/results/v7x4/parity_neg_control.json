@@ -1,0 +1,119 @@
+{
+  "stage": "parity_neg_control",
+  "timestamp_utc": "2026-09-26T00:25:12Z",
+  "status": "PASS",
+  "sinkhorn_iters": 0,
+  "num_prompts": 4,
+  "mean_top1_agreement_vs_ref": 0.0,
+  "mean_cosine_similarity_vs_ref": 0.0,
+  "per_prompt_top1": [
+    0.0,
+    0.0,
+    0.0,
+    0.0
+  ],
+  "per_prompt_cosine": [
+    0.0,
+    0.0,
+    0.0,
+    0.0
+  ],
+  "hardware": {
+    "backend": "tpu",
+    "device_kind": "TPU7x",
+    "world_size": 8,
+    "local_device_count": 8,
+    "process_index": 0,
+    "process_count": 1,
+    "devices": [
+      {
+        "id": 0,
+        "process_index": 0,
+        "device_kind": "TPU7x",
+        "coords": [
+          0,
+          0,
+          0
+        ],
+        "core_on_chip": 0
+      },
+      {
+        "id": 1,
+        "process_index": 0,
+        "device_kind": "TPU7x",
+        "coords": [
+          0,
+          0,
+          0
+        ],
+        "core_on_chip": 1
+      },
+      {
+        "id": 2,
+        "process_index": 0,
+        "device_kind": "TPU7x",
+        "coords": [
+          1,
+          0,
+          0
+        ],
+        "core_on_chip": 0
+      },
+      {
+        "id": 3,
+        "process_index": 0,
+        "device_kind": "TPU7x",
+        "coords": [
+          1,
+          0,
+          0
+        ],
+        "core_on_chip": 1
+      },
+      {
+        "id": 4,
+        "process_index": 0,
+        "device_kind": "TPU7x",
+        "coords": [
+          0,
+          1,
+          0
+        ],
+        "core_on_chip": 0
+      },
+      {
+        "id": 5,
+        "process_index": 0,
+        "device_kind": "TPU7x",
+        "coords": [
+          0,
+          1,
+          0
+        ],
+        "core_on_chip": 1
+      },
+      {
+        "id": 6,
+        "process_index": 0,
+        "device_kind": "TPU7x",
+        "coords": [
+          1,
+          1,
+          0
+        ],
+        "core_on_chip": 0
+      },
+      {
+        "id": 7,
+        "process_index": 0,
+        "device_kind": "TPU7x",
+        "coords": [
+          1,
+          1,
+          0
+        ],
+        "core_on_chip": 1
+      }
+    ]
+  }
+}

@@ -1,0 +1,172 @@
+{
+  "started": "2026-09-25T13:59:52Z",
+  "environment": {
+    "ok": true,
+    "host": "probe-a-0925-w-0-0",
+    "python": "3.12.14",
+    "jax": "0.11.1",
+    "jaxlib": "0.11.1",
+    "libtpu": "0.0.46.1",
+    "backend": "tpu",
+    "process_index": 0,
+    "process_count": 1,
+    "device_count": 2,
+    "local_device_count": 2,
+    "devices": [
+      {
+        "id": 0,
+        "process_index": 0,
+        "kind": "TPU7x",
+        "coords": [
+          0,
+          0,
+          0
+        ],
+        "core_on_chip": 0,
+        "platform": "tpu"
+      },
+      {
+        "id": 1,
+        "process_index": 0,
+        "kind": "TPU7x",
+        "coords": [
+          0,
+          0,
+          0
+        ],
+        "core_on_chip": 1,
+        "platform": "tpu"
+      }
+    ],
+    "memory": {
+      "0": {
+        "bytes_limit": 101724453888,
+        "bytes_in_use": 65536,
+        "largest_free_block_bytes": 101724388352
+      },
+      "1": {
+        "bytes_limit": 101724453888,
+        "bytes_in_use": 65536,
+        "largest_free_block_bytes": 101724388352
+      }
+    },
+    "tpu_info": {
+      "bf16_ops_per_second": 1155000000000000,
+      "chip_version": "7x",
+      "cmem_capacity_bytes": 0,
+      "fp8_ops_per_second": 2300000000000000,
+      "generation": 7,
+      "hbm_capacity_bytes": 103000000000,
+      "int4_ops_per_second": 0,
+      "int8_ops_per_second": 0,
+      "is_lite": false,
+      "is_megacore": false,
+      "is_split_chip": true,
+      "mem_bw_bytes_per_second": 3700000000000,
+      "mxu_column_size": 256,
+      "num_accumulators": 128,
+      "num_cores": 1,
+      "num_lanes": 128,
+      "num_mxus": 2,
+      "num_sublanes": 8,
+      "smem_capacity_bytes": 1048576,
+      "sparse_core": "SparseCoreInfo(num_cores=2, num_subcores=16, num_lanes=16, vmem_capacity_bytes=524288, dma_granule_size_bytes=32)",
+      "vmem_capacity_bytes": 67108864
+    },
+    "env": {
+      "TPU_PROCESS_ADDRESSES": "probe-a-0925-w-0-0.probe-a-0925:8471",
+      "TPU_TOPOLOGY": "1x1x1",
+      "TPU_WORKER_ID": "0",
+      "TPU_SKIP_MDS_QUERY": "true",
+      "TPU_TOPOLOGY_WRAP": "false,false,false",
+      "JOB_COMPLETION_INDEX": "0",
+      "TPU_CHIPS_PER_HOST_BOUNDS": "1,1,1",
+      "TPU_PROCESS_PORT": "8471",
+      "TPU_LOG_DIR": "/tmp/tpu_logs/main",
+      "NUM_PROCESSES": "1",
+      "COORDINATOR_ADDRESS": "probe-a-0925-w-0-0.probe-a-0925:8476",
+      "TPU_ACCELERATOR_TYPE": "tpu7x-2",
+      "TPU_RUNTIME_METRICS_PORTS": "8431,8432",
+      "JAX_COMPILATION_CACHE_DIR": "/tmp/jax-cache",
+      "TPU_TOPOLOGY_ALT": "false",
+      "JAX_PLATFORMS": "tpu",
+      "TPU_HOST_BOUNDS": "1,1,1",
+      "XLA_FLAGS": "--xla_allow_excess_precision=false",
+      "TPU_WORKER_HOSTNAMES": "probe-a-0925-w-0-0.probe-a-0925",
+      "TPU_LIBRARY_PATH": "/usr/local/lib/python3.12/site-packages/libtpu/libtpu.so",
+      "TPU_ML_PLATFORM": "JAX",
+      "TPU_ML_PLATFORM_VERSION": "0.11.1",
+      "LIBTPU_INIT_ARGS": " --xla_tpu_use_enhanced_launch_barrier=true"
+    },
+    "cpu_count": 56,
+    "shm_bytes_free": 107374182400,
+    "seconds": 1.454
+  },
+  "hbm_bandwidth": {
+    "ok": true,
+    "bytes_moved_per_rep": 8589934592,
+    "seconds_per_rep": 0.00268598709999992,
+    "gbps": 3198.0550435258065,
+    "seconds": 0.384
+  },
+  "pallas_features": {
+    "ok": true,
+    "vmem_60mib": true,
+    "fp8_x_fp8": {
+      "max_abs_err": 0.44515228271484375,
+      "max_abs_ref": 92.36763000488281
+    },
+    "bf16_x_fp8": {
+      "max_abs_err": 0.0,
+      "max_abs_ref": 92.51205444335938
+    },
+    "mxfp4_to_fp8": {
+      "err_vs_rows_interleaved_by_nibble": 1.52587890625e-05,
+      "err_vs_rows_blocked_by_nibble": 366.39471435546875,
+      "max_abs_ref": 237.64639282226562
+    },
+    "seconds": 0.705
+  },
+  "remote_dma": {
+    "ok": true,
+    "devices": 2,
+    "offsets": [
+      1
+    ],
+    "timings": {
+      "4096": {
+        "seconds_per_call": 0.00014222000000074786,
+        "seconds_per_copy_avg": 8.888750000046741e-06,
+        "gbps_per_copy": 0.46080720011007864
+      },
+      "1048576": {
+        "seconds_per_call": 0.0001560093333334104,
+        "seconds_per_copy_avg": 9.75058333333815e-06,
+        "gbps_per_copy": 107.53982240373468
+      },
+      "8388608": {
+        "seconds_per_call": 0.00030030566666520525,
+        "seconds_per_copy_avg": 1.8769104166575328e-05,
+        "gbps_per_copy": 446.9370474771366
+      }
+    },
+    "data_correct": true,
+    "seconds": 0.713
+  },
+  "storage": {
+    "ok": true,
+    "files": [
+      "model-00003-of-00048.safetensors",
+      "model-00004-of-00048.safetensors"
+    ],
+    "bytes": 14779518064,
+    "moved": 14779518064,
+    "workers": 64,
+    "download_seconds": 39.135873222,
+    "download_gbps": 0.3776463088011993,
+    "host_to_hbm_seconds": 2.946184792000011,
+    "host_to_hbm_gbps": 5.0164939090487115,
+    "seconds": 42.746
+  },
+  "finished": "2026-09-25T14:00:38Z"
+}
