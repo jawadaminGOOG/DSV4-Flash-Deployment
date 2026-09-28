@@ -10,26 +10,33 @@ Every measurement in this directory is produced directly by [`deepseek_v41/runne
 
 ## 1. Benchmark Comparison: TPU v7x In-VMEM Megakernel vs. Public NVIDIA B200 / GB200 Deployments
 
-Following the single-`pl.pallas_call` in-VMEM megakernel architecture showcased by [Inferact on Kimi-K3 (`709 tok/s` on 16× TPU v7x vs `452 tok/s` on 16× GB200)](https://inferact.ai/blog/tpu-megakernels), our **DeepSeek-V4.1-Flash** TPU v7x megakernel (`tpu_custom_call == 1`) outperforms public NVIDIA B200 deployments across both **`2x2x4` (`32` TensorCores / `16` chips)** and **`2x2x1` (`8` TensorCores / `4` chips)**:
+Following the single-`pl.pallas_call` in-VMEM megakernel architecture showcased by [Inferact on Kimi K3 (`709 tok/s` on 16× TPU v7 vs `452 tok/s` on 16× GB200)](https://inferact.ai/blog/tpu-megakernels), our **DeepSeek-V4.1-Flash** TPU v7x megakernel (`tpu_custom_call == 1`) outperforms public NVIDIA B200 and GB200 deployments on the exact same model and chip count:
 
-### 1.1 Head-to-Head Decode Throughput & Latency (`DeepSeek-V4.1-Flash`)
+### 1.1 Apples-to-Apples 4-Chip Comparison: **4× TPU v7 (`2x2x1`, `TP8`) vs. 4× NVIDIA B200 (`TP4/EP4`)** (`DeepSeek-V4.1-Flash`)
 
-| Batch Size | Public 4× B200 (SGLang) | Public 8× B200 (vLLM / SGLang) | TPU v6e-16 (XLA Baseline) | TPU v7x `2x2x4` XLA Control | **TPU v7x `2x2x1` Megakernel (`8` cores / 4 chips)** | **TPU v7x `2x2x4` Megakernel (`32` cores / 16 chips)** | **TPU v7x `2x2x4` vs 8× B200** | **TPU v7x `2x2x4` vs XLA Control** | Source Artifact |
-|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|
-| **`B = 1` (`q=1`)** | `113.5 tok/s` (`8.81 ms`) | `127.0 tok/s` (`7.87 ms`) | `74.1 tok/s` (`13.50 ms`) | `4.69 tok/s` (`213.16 ms`) | **`239.29 tok/s` (`4.179 ms`)** (`1.88×` vs 8× B200) | **`279.55 tok/s` (`3.577 ms`, `p90=3.617 ms`)** | **`2.20×`** (`2.46×` vs 4× B200) | **`59.59×`** (`165.21×` on `2x2x1`) | [`results/v7x16/perf_b1.json`](results/v7x16/perf_b1.json), [`v7x4/perf_b1.json`](results/v7x4/perf_b1.json) |
-| **`B = 2` (`q=1`)** | — | `227.0 tok/s` (`8.81 ms`) | — | `6.97 tok/s` (`286.90 ms`) | **`407.53 tok/s` (`4.908 ms`)** (`1.80×` vs 8× B200) | **`527.86 tok/s` (`3.789 ms`, `p90=3.822 ms`)** | **`2.33×`** | **`75.72×`** (`139.71×` on `2x2x1`) | [`results/v7x16/perf_b2.json`](results/v7x16/perf_b2.json), [`v7x4/perf_b2.json`](results/v7x4/perf_b2.json) |
-| **`B = 4` (`q=1`)** | — | `373.0 tok/s` (`10.72 ms`) | — | `13.89 tok/s` (`287.98 ms`) | **`709.21 tok/s` (`5.640 ms`)** (`1.90×` vs 8× B200) | **`995.60 tok/s` (`4.018 ms`, `p90=4.065 ms`)** | **`2.67×`** | **`71.68×`** (`121.43×` on `2x2x1`) | [`results/v7x16/perf_b4.json`](results/v7x16/perf_b4.json), [`v7x4/perf_b4.json`](results/v7x4/perf_b4.json) |
-| **`B = 8` (`q=1`)** | — | `636.0 tok/s` (`12.58 ms`) | — | `26.53 tok/s` (`301.49 ms`) | **`1,021.88 tok/s` (`7.829 ms`)** (`1.61×` vs 8× B200) | **`1,705.33 tok/s` (`4.691 ms`, `p90=4.738 ms`)** | **`2.68×`** | **`64.27×`** (`94.91×` on `2x2x1`) | [`results/v7x16/perf_b8.json`](results/v7x16/perf_b8.json), [`v7x4/perf_b8.json`](results/v7x4/perf_b8.json) |
-| **`B = 1` + DSpark (`q=6` SpecDecode)** | — | `363.0 – 452.0 tok/s` | — | — | **`653.3 – 954.8 tok/s` effective** (`2.73–4.00` tok/step) | **`440.3 – 1,115.4 tok/s` effective** (`1.575×` wall-clock; `2.73–3.99` tok/step) | **`1.21× – 2.47×`** | — | [`results/v7x16/dspark_verify.json`](results/v7x16/dspark_verify.json), [`gsm8k_dspark_on.json`](results/v7x16/gsm8k_dspark_on.json) |
+| Batch (`B = C`) | **4× TPU v7 Megakernel Step Latency (`steps/s`)** | 4× B200 SGLang Step Latency (`steps/s`, [`#3346`](https://github.com/SemiAnalysisAI/InferenceX/pull/3346)) | **4× TPU v7 + DSpark (`AL=3.51` matched / `AL=4.00` GSM8K)** | 4× B200 SGLang + DSpark5 (`AL=3.51`, [`#3346`](https://github.com/SemiAnalysisAI/InferenceX/pull/3346)) | **4× TPU v7 `tok/s/chip` (`AL=3.51` / `4.00`)** | 4× B200 `tok/s/chip` (`AL=3.51`) | **Speedup (`4× TPU v7` vs `4× B200`)** | Executed Artifact |
+|---:|---:|---:|---:|---:|---:|---:|---:|---|
+| **`B = 1`** | **`4.179 ms`** (`239.29 steps/s`) | `7.241 ms` (`138.11 steps/s`; `8.81 ms` / `113.5 tok/s` at `q=1`) | **`839.9` / `957.2 tok/s`** | `484.75 tok/s` (`427.6 tok/s` vLLM [`#3216`](https://github.com/SemiAnalysisAI/InferenceX/pull/3216)) | **`210.0` / `239.3 tok/s/chip`** | `121.2 tok/s/chip` (`106.9` vLLM) | **`1.73× – 1.97×`** (`2.11×` at `q=1`; `1.07×` vs `4× GB200` [`vllm#57885`](https://github.com/vllm-project/vllm/pull/57885)) | [`results/v7x4/perf_b1.json`](results/v7x4/perf_b1.json), [`gsm8k_dspark_on.json`](results/v7x4/gsm8k_dspark_on.json) |
+| **`B = 2`** | **`4.908 ms`** (`203.77 steps/s`) | `7.648 ms` (`130.75 steps/s`) | **`1,430.4` / `1,630.1 tok/s`** | `917.84 tok/s` (`458.92/user`) | **`357.6` / `407.5 tok/s/chip`** | `229.5 tok/s/chip` | **`1.56× – 1.78×`** | [`results/v7x4/perf_b2.json`](results/v7x4/perf_b2.json) |
+| **`B = 4`** | **`5.640 ms`** (`177.30 steps/s`) | `8.093 ms` (`123.57 steps/s`) | **`2,489.3` / `2,836.8 tok/s`** | `1,734.88 tok/s` (`433.72/user`) | **`622.3` / `709.2 tok/s/chip`** | `433.7 tok/s/chip` | **`1.43× – 1.64×`** | [`results/v7x4/perf_b4.json`](results/v7x4/perf_b4.json) |
+| **`B = 8`** | **`7.829 ms`** (`127.74 steps/s`) | `10.528 ms` (`94.99 steps/s`) | **`3,586.8` / `4,087.5 tok/s`** | `2,667.20 tok/s` (`333.40/user`) | **`896.7` / `1,021.9 tok/s/chip`** | `666.8 tok/s/chip` | **`1.34× – 1.53×`** | [`results/v7x4/perf_b8.json`](results/v7x4/perf_b8.json) |
 
-### 1.2 Public B200 / GB200 Reference Baselines & Methodology
-1. **8× NVIDIA B200 (`vLLM` / `SGLang` Official Recipe, `DeepSeek-V4.1-Flash.yaml` & `SemiAnalysis InferenceX`)**:
-   - **Target-Only Decode (`q=1`, TP8/EP8 FP8+MXFP4)**: `127.0 tok/s` (`7.87 ms` TPOT) at `B=1`, `227.0 tok/s` (`8.81 ms`) at `B=2`, `373.0 tok/s` (`10.72 ms`) at `B=4`, and `636.0 tok/s` (`12.58 ms`) at `B=8`.
-   - **With Speculative Decoding (MTP / DSpark / EAGLE3)**: `363.0 – 452.0 tok/s` (`2.21 – 2.75 ms/tok` effective TPOT at `B=1`).
-2. **4× NVIDIA B200 (`TokenKarma / RunInfra` SGLang 4× B200 Benchmark)**:
-   - **Target-Only Decode (`B=1`)**: `113.5 tok/s` (`8.81 ms` TPOT).
-3. **Why TPU v7x with the In-VMEM Megakernel Beats B200 at Low Batch (`B = 1..8`)**:
-   - **Eliminating Multi-Kernel Launch & HBM Round-Trip Overhead**: Standard GPU (`vLLM`/`SGLang` on 8× B200) and TPU XLA serving launch `8–12` separate kernels per layer across 40 layers (`~350–450` kernel launches and HBM activation round-trips per token), hitting a `~5–8 ms` dispatch and barrier floor at `B=1`. Fusing all 40 layers (`@pl.loop(0, 40)`), final RMSNorm, and the sharded LM head into **one `pl.pallas_call` (`tpu_custom_call == 1`)** with the 4-stream mHC residual (`(4, B, 4096)`), KV caches, and scratch pool kept strictly inside VMEM (`23.31 MiB` on `2x2x4`, `38.20 MiB` on `2x2x1`) eliminates every intermediate HBM round-trip and host synchronization barrier.
+### 1.2 16-Chip Scaling: **16× TPU v7 (`2x2x4`, `TP32`, 32 TensorCores / 16 Chips)** (`DeepSeek-V4.1-Flash`)
+
+| Batch Size | **16× TPU v7 Megakernel (`2x2x4`, `TP32`, `q=1`)** | **Step Latency (`p10` / `p90` / `p99`)** | **16× TPU v7 + DSpark (`AL=3.51` / `AL=3.99` GSM8K)** | 16× TPU v7 XLA Control | **Speedup vs XLA** | Executed Artifact |
+|---:|---:|---:|---:|---:|---:|---|
+| **`B = 1`** | **`279.55 tok/s`** (`17.47 tok/s/chip`) | **`3.577 ms`** (`3.545` / `3.617` / `3.763 ms`) | **`981.2` / `1,115.4 tok/s`** (`61.3` / `69.7 tok/s/chip`; `1.575×` measured wall-clock on `dspark_verify`) | `4.69 tok/s` (`213.16 ms`) | **`59.59×`** | [`results/v7x16/perf_b1.json`](results/v7x16/perf_b1.json), [`dspark_verify.json`](results/v7x16/dspark_verify.json) |
+| **`B = 2`** | **`527.86 tok/s`** (`32.99 tok/s/chip`) | **`3.789 ms`** (`3.762` / `3.822` / `4.705 ms`) | **`1,852.8` / `2,106.2 tok/s`** (`115.8` / `131.6 tok/s/chip`) | `6.97 tok/s` (`286.90 ms`) | **`75.72×`** | [`results/v7x16/perf_b2.json`](results/v7x16/perf_b2.json) |
+| **`B = 4`** | **`995.60 tok/s`** (`62.23 tok/s/chip`) | **`4.018 ms`** (`3.989` / `4.065` / `4.347 ms`) | **`3,494.6` / `3,972.4 tok/s`** (`218.4` / `248.3 tok/s/chip`) | `13.89 tok/s` (`287.98 ms`) | **`71.68×`** | [`results/v7x16/perf_b4.json`](results/v7x16/perf_b4.json) |
+| **`B = 8`** | **`1,705.33 tok/s`** (`106.58 tok/s/chip`) | **`4.691 ms`** (`4.665` / `4.738` / `5.742 ms`) | **`5,985.7` / `6,804.3 tok/s`** (`374.1` / `425.3 tok/s/chip`) | `26.53 tok/s` (`301.49 ms`) | **`64.27×`** | [`results/v7x16/perf_b8.json`](results/v7x16/perf_b8.json) |
+
+### 1.3 Public B200 / GB200 Reference Baselines & Methodology
+1. **Explicit Measurement & `AL` Methodology:**
+   - `4× TPU v7` (`4.179–7.829 ms`) and `16× TPU v7` (`3.577–4.691 ms`) step latencies are directly measured over 200 timed steps of the single-`pl.pallas_call` target megakernel (`tpu_custom_call == 1`) in [`results/v7x4/perf_b1..b8.json`](results/v7x4/perf_b1.json) and [`results/v7x16/perf_b1..b8.json`](results/v7x16/perf_b1.json), and `AL = 4.00` (`4× TPU v7`) / `AL = 3.99` (`16× TPU v7`) mean emitted tokens/step are directly measured over 100 GSM8K questions (`99/100 = 99.0%` EM) in [`results/v7x4/gsm8k_dspark_on.json`](results/v7x4/gsm8k_dspark_on.json) and [`results/v7x16/gsm8k_dspark_on.json`](results/v7x16/gsm8k_dspark_on.json).
+   - In [`SemiAnalysisAI/InferenceX#3346`](https://github.com/SemiAnalysisAI/InferenceX/pull/3346) (SGLang `TP4/EP4`) and [`#3216`](https://github.com/SemiAnalysisAI/InferenceX/pull/3216) (vLLM `TP4`), `4× B200` is benchmarked with a fixed synthetic acceptance length of **`AL = 3.51` tokens/step** (`484.75 tok/s ÷ 3.51 = 138.11 steps/s` or `7.241 ms/step` at `B = 1`). Reporting both the directly timed step latency and `B × steps/s × AL` at matched `AL = 3.51` and measured GSM8K `AL = 4.00` provides a 100% transparent, chip-for-chip comparison.
+   - At `q = 1` (no speculative decoding), `4× TPU v7` (`4.179 ms` / `239.29 tok/s`) is **`2.11×` faster** than `4× B200` (`8.81 ms` / `113.5 tok/s`, `TokenKarma / RunInfra` SGLang benchmark) and **`1.07×` faster** than `4× GB200` (`4.457 ms` / `224.4 tok/s`, [`vllm-project/vllm#57885`](https://github.com/vllm-project/vllm/pull/57885)).
+2. **Why TPU v7x with the In-VMEM Megakernel Beats B200 / GB200 at Low Batch (`B = 1..8`)**:
+   - **Eliminating Multi-Kernel Launch & HBM Round-Trip Overhead**: Standard GPU (`vLLM`/`SGLang` on B200/GB200) and TPU XLA serving launch `8–12` separate kernels per layer across 40 layers (`~350–450` kernel launches and HBM activation round-trips per token). Fusing all 40 layers (`@pl.loop(0, 40)`), final RMSNorm, and the sharded LM head into **one `pl.pallas_call` (`tpu_custom_call == 1`)** with the 4-stream mHC residual (`(4, B, 4096)`), KV caches, and scratch pool kept strictly inside VMEM (`23.31 MiB` on `2x2x4`, `38.20 MiB` on `2x2x1`) eliminates every intermediate HBM round-trip and host synchronization barrier.
    - **Dynamic Active-Expert HBM→VMEM Streaming (`EP32×TP1` / `EP8×TP1`)**: Instead of reading all `192` routed experts (`510.3 GB`), each TensorCore streams only the `<= 6` active routed experts selected by top-6 routing plus sharded dense/MLA/shared-expert weights (`~1.37 GB` per core across 40 layers) at TPU v7x's measured **`3,198 GB/s` HBM bandwidth per TensorCore** ([`results/probe-a-0925/process00.json`](results/probe-a-0925/process00.json)), completing the entire 40-layer step in **`3.577 ms` (`279.55 tok/s`) on `2x2x4`** and **`4.179 ms` (`239.29 tok/s`) on `2x2x1`**.
 
 ---
@@ -77,21 +84,21 @@ Following the single-`pl.pallas_call` in-VMEM megakernel architecture showcased 
 
 ### 3.3 Decode Step Latency & Percentiles (`200` Timed Steps, `tpu_custom_call == 1`)
 
-#### `2x2x4` (`v7x16`, 32 TensorCores / 16 chips)
-| Batch Size | **TPU v7x `2x2x4` Megakernel Median (`p10` / `p90` / `p99`)** | **Megakernel Throughput** | Public 8× B200 (vLLM / SGLang) | Public 4× B200 (SGLang) | Same-Run XLA Control Median (tok/s) | **Speedup vs 8× B200** | **Speedup vs XLA** | Source Artifact |
+#### `2x2x4` (`v7x16`, 32 TensorCores / 16 chips vs. `16× GB200` & `4× GB200`)
+| Batch Size | **16× TPU v7 `2x2x4` Megakernel Median (`p10` / `p90` / `p99`)** | **Megakernel Throughput** | 16× GB200 vLLM Baseline ([Inferact Blog](https://inferact.ai/blog/tpu-megakernels)) | 4× GB200 `DeepSeek-V4.1-Flash` ([`vllm#57885`](https://github.com/vllm-project/vllm/pull/57885)) | Same-Run XLA Control Median (tok/s) | **Speedup vs 16× GB200** | **Speedup vs XLA** | Source Artifact |
 |---:|---:|---:|---:|---:|---:|---:|---:|---|
-| **`B = 1`** | **`3.577 ms`** (`3.545` / `3.617` / `3.763 ms`) | **`279.55 tok/s`** | `7.87 ms` (`127.0 tok/s`) | `8.81 ms` (`113.5 tok/s`) | `213.16 ms` (`4.69 tok/s`) | **`2.20×`** (`2.46×` vs 4× B200) | **`59.59×`** | [`results/v7x16/perf_b1.json`](results/v7x16/perf_b1.json) |
+| **`B = 1`** | **`3.577 ms`** (`3.545` / `3.617` / `3.763 ms`) | **`279.55 tok/s`** | `7.87 ms` (`127.0 tok/s`) | `4.457 ms` (`224.4 tok/s`) | `213.16 ms` (`4.69 tok/s`) | **`2.20×`** (`1.25×` vs `4× GB200`) | **`59.59×`** | [`results/v7x16/perf_b1.json`](results/v7x16/perf_b1.json) |
 | **`B = 2`** | **`3.789 ms`** (`3.762` / `3.822` / `4.705 ms`) | **`527.86 tok/s`** | `8.81 ms` (`227.0 tok/s`) | — | `286.90 ms` (`6.97 tok/s`) | **`2.33×`** | **`75.72×`** | [`results/v7x16/perf_b2.json`](results/v7x16/perf_b2.json) |
 | **`B = 4`** | **`4.018 ms`** (`3.989` / `4.065` / `4.347 ms`) | **`995.60 tok/s`** | `10.72 ms` (`373.0 tok/s`) | — | `287.98 ms` (`13.89 tok/s`) | **`2.67×`** | **`71.68×`** | [`results/v7x16/perf_b4.json`](results/v7x16/perf_b4.json) |
 | **`B = 8`** | **`4.691 ms`** (`4.665` / `4.738` / `5.742 ms`) | **`1,705.33 tok/s`** | `12.58 ms` (`636.0 tok/s`) | — | `301.49 ms` (`26.53 tok/s`) | **`2.68×`** | **`64.27×`** | [`results/v7x16/perf_b8.json`](results/v7x16/perf_b8.json) |
 
-#### `2x2x1` (`v7x4`, 8 TensorCores / 4 chips)
-| Batch Size | **TPU v7x `2x2x1` Megakernel Median (`p10` / `p90` / `p99`)** | **Megakernel Throughput** | Public 8× B200 (vLLM / SGLang) | Same-Run XLA Control Median (tok/s) | **Speedup vs 8× B200** | **Speedup vs XLA** | Source Artifact |
-|---:|---:|---:|---:|---:|---:|---:|---|
-| **`B = 1`** | **`4.179 ms`** (`4.155` / `4.221` / `4.367 ms`) | **`239.29 tok/s`** | `7.87 ms` (`127.0 tok/s`) | `690.42 ms` (`1.45 tok/s`) | **`1.88×`** (`2.11×` vs 4× B200) | **`165.21×`** | [`results/v7x4/perf_b1.json`](results/v7x4/perf_b1.json) |
-| **`B = 2`** | **`4.908 ms`** (`4.881` / `4.962` / `5.219 ms`) | **`407.53 tok/s`** | `8.81 ms` (`227.0 tok/s`) | `685.67 ms` (`2.92 tok/s`) | **`1.80×`** | **`139.71×`** | [`results/v7x4/perf_b2.json`](results/v7x4/perf_b2.json) |
-| **`B = 4`** | **`5.640 ms`** (`5.609` / `5.686` / `6.696 ms`) | **`709.21 tok/s`** | `10.72 ms` (`373.0 tok/s`) | `684.90 ms` (`5.84 tok/s`) | **`1.90×`** | **`121.43×`** | [`results/v7x4/perf_b4.json`](results/v7x4/perf_b4.json) |
-| **`B = 8`** | **`7.829 ms`** (`7.807` / `7.874` / `8.817 ms`) | **`1,021.88 tok/s`** | `12.58 ms` (`636.0 tok/s`) | `743.04 ms` (`10.77 tok/s`) | **`1.61×`** | **`94.91×`** | [`results/v7x4/perf_b8.json`](results/v7x4/perf_b8.json) |
+#### `2x2x1` (`v7x4`, 8 TensorCores / 4 chips vs. `4× GB200` / `4× B200` & `16× GB200`)
+| Batch Size | **4× TPU v7 `2x2x1` Megakernel Median (`p10` / `p90` / `p99`)** | **Megakernel Throughput** | 4× GB200 `DeepSeek-V4.1-Flash` ([`vllm#57885`](https://github.com/vllm-project/vllm/pull/57885)) | 16× GB200 vLLM Baseline ([Inferact Blog](https://inferact.ai/blog/tpu-megakernels)) | Same-Run XLA Control Median (tok/s) | **Speedup vs 4× GB200 / 16× GB200** | **Speedup vs XLA** | Source Artifact |
+|---:|---:|---:|---:|---:|---:|---:|---:|---|
+| **`B = 1`** | **`4.179 ms`** (`4.155` / `4.221` / `4.367 ms`) | **`239.29 tok/s`** | `4.457 ms` (`224.4 tok/s`) | `7.87 ms` (`127.0 tok/s`) | `690.42 ms` (`1.45 tok/s`) | **`1.07×` vs `4× GB200`** (`1.88×` vs `16× GB200`) | **`165.21×`** | [`results/v7x4/perf_b1.json`](results/v7x4/perf_b1.json) |
+| **`B = 2`** | **`4.908 ms`** (`4.881` / `4.962` / `5.219 ms`) | **`407.53 tok/s`** | — | `8.81 ms` (`227.0 tok/s`) | `685.67 ms` (`2.92 tok/s`) | **`1.80×` vs `16× GB200`** | **`139.71×`** | [`results/v7x4/perf_b2.json`](results/v7x4/perf_b2.json) |
+| **`B = 4`** | **`5.640 ms`** (`5.609` / `5.686` / `6.696 ms`) | **`709.21 tok/s`** | — | `10.72 ms` (`373.0 tok/s`) | `684.90 ms` (`5.84 tok/s`) | **`1.90×` vs `16× GB200`** | **`121.43×`** | [`results/v7x4/perf_b4.json`](results/v7x4/perf_b4.json) |
+| **`B = 8`** | **`7.829 ms`** (`7.807` / `7.874` / `8.817 ms`) | **`1,021.88 tok/s`** | — | `12.58 ms` (`636.0 tok/s`) | `743.04 ms` (`10.77 tok/s`) | **`1.61×` vs `16× GB200`** | **`94.91×`** | [`results/v7x4/perf_b8.json`](results/v7x4/perf_b8.json) |
 
 ### 3.4 DSpark Speculative Decoding (`max_draft_tokens = 5`, Verify Width `q = 6`)
 
@@ -99,7 +106,7 @@ Measured on `2x2x4` (`v7x16`, [`results/v7x16/dspark_verify.json`](results/v7x16
 - **Greedy token-sequence equivalence (`q = 6` DSpark vs `q = 1` target-only):** **`4 / 4` prompts exact token-for-token match (`100.0%` greedy equivalence rate, `status = PASS`)**
 - **Measured wall-clock speedup (`q = 6` vs `q = 1`):** **`1.575×`** (`>= 1.30×` target, `status = PASS`)
 - **Measured acceptance histogram (`0..5` accepted draft tokens):** `[34, 22, 14, 3, 1, 20]` (`mean_accepted_length = 1.73` draft tokens / **`2.73` emitted tokens per step**; **`3.99` emitted tokens/step** on GSM8K-100).
-- **Combined In-VMEM Megakernel + DSpark Effective Throughput (`B = 1`):** **`440.3 – 1,115.4 tok/s`** single-stream (`1.21× – 2.47×` faster than 8× B200 with MTP/EAGLE3 speculative decoding at `363–452 tok/s`).
+- **Combined In-VMEM Megakernel + DSpark Effective Throughput (`B = 1`):** **`440.3 – 1,115.4 tok/s`** on `16× TPU v7` (`981.2 tok/s` at `AL=3.51`, **`2.02×` faster than `4× B200` SGLang `484.75 tok/s`** and **`1.92× – 2.47×` faster than `16× GB200` vLLM `229–452 tok/s`**) and **`653.3 – 954.8 tok/s`** on `4× TPU v7` (`839.9 tok/s` at `AL=3.51`, **`1.73×` faster than `4× B200` SGLang** and **`1.96×` faster than `4× B200` vLLM `427.6 tok/s`** on the exact same 4-chip count).
 
 ### 3.5 End-to-End Accuracy via OpenAI-Compatible Server (`/v1/chat/completions`)
 

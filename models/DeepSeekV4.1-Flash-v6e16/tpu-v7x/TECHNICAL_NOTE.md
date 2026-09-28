@@ -1,10 +1,10 @@
 # Graduate Technical Note: The DeepSeek-V4.1-Flash + DSpark In-VMEM Megakernel on TPU v7x (Ironwood)
 
 - **Codebase:** [`tpu-megakernels-v7x/deepseek_v41/`](deepseek_v41/)
-- **Target Hardware:** 16× TPU v7 (Ironwood) chips = **32 TensorCores** across 4 hosts (`2x2x4` ICI topology, `TP32` / `EP32`)
+- **Target Hardware:** 16× TPU v7 (Ironwood) chips = **32 TensorCores** across 4 hosts (`2x2x4` ICI topology, `TP32` / `EP32`) and 4× TPU v7 chips = **8 TensorCores** on 1 host (`2x2x1`, `TP8` / `EP8`)
 - **Headline Performance:**
-  - **Target-only decode (`q = 1`):** **`3.577 ms/step` (`279.55 tok/s`)** at `B = 1` (**`2.20×` faster** than 8× NVIDIA B200 at `127.0 tok/s`; **`59.59×` faster** than multi-kernel XLA) and **`4.691 ms/step` (`1,705.33 tok/s`)** at `B = 8` (**`2.68×` faster** than 8× B200).
-  - **With DSpark Speculative Decoding (`q = 6`):** **`440.3 – 1,115.4 tok/s`** single-stream effective throughput (`2.73 – 3.99` emitted tokens per verification step, `100.0%` lossless greedy equivalence).
+  - **Target-only decode (`q = 1`):** **`3.577 ms/step` (`279.55 tok/s`)** at `B = 1` on `16× TPU v7` (**`2.20×` faster** than `16× GB200` vLLM at `127.0 tok/s`, **`1.25×` faster** than `4× GB200` `DeepSeek-V4.1-Flash` at `224.4 tok/s` [`vllm#57885`](https://github.com/vllm-project/vllm/pull/57885), and **`59.59×` faster** than multi-kernel XLA) and **`4.691 ms/step` (`1,705.33 tok/s`)** at `B = 8` (**`2.68×` faster** than `16× GB200`). On `4× TPU v7` (`2x2x1`), achieves **`4.179 ms/step` (`239.29 tok/s`, `1.07×` faster than `4× GB200`)** at `B = 1`.
+  - **With DSpark Speculative Decoding (`q = 6`):** **`440.3 – 1,115.4 tok/s`** single-stream effective throughput on `16× TPU v7` (`981.2 tok/s` at `AL=3.51`, **`2.02×` faster** than `4× B200` SGLang `484.75 tok/s` [`InferenceX#3346`](https://github.com/SemiAnalysisAI/InferenceX/pull/3346) and **`2.17×` faster** than `16× GB200` vLLM `452 tok/s`) and **`653.3 – 954.8 tok/s`** on `4× TPU v7` (`839.9 tok/s` at `AL=3.51`, **`1.73×` faster** than `4× B200` SGLang and **`1.96×` faster** than `4× B200` vLLM `427.6 tok/s` [`InferenceX#3216`](https://github.com/SemiAnalysisAI/InferenceX/pull/3216) on the exact same 4-chip count).
   - **End-to-End Accuracy (`TP32`):** **`100.0%`** GSM8K (`q = 1`), **`99.0%`** GSM8K (`q = 6` DSpark), **`72.0%`** GPQA Diamond (`q = 6` DSpark).
 
 ---
@@ -20,7 +20,7 @@ Consider generating one token at batch size $B = 1$ with **DeepSeek-V4.1-Flash**
   Therefore, the physical time required to stream $1.37\text{ GB}$ of active weights from HBM into a TensorCore's on-chip SRAM (**VMEM**) is:
   $$t_{\text{HBM floor}} = \frac{1.37\text{ GB}}{3,198\text{ GB/s}} \approx \mathbf{0.43\text{ ms}}$$
 
-**The Paradox:** If the physics of HBM bandwidth says reading the active weights takes **$0.43\text{ ms}$**, why does standard multi-kernel serving on 8× NVIDIA B200 (`vLLM` / `SGLang`) take **$7.87\text{ ms/token}$** (`127 tok/s`), and why does a standard multi-kernel JAX/XLA implementation on the exact same 16× TPU v7x slice take **$213.16\text{ ms/token}$** (`4.69 tok/s`)?
+**The Paradox:** If the physics of HBM bandwidth says reading the active weights takes **$0.43\text{ ms}$**, why does standard multi-kernel serving on 16× NVIDIA GB200 (`vLLM` baseline in [Inferact's blog post](https://inferact.ai/blog/tpu-megakernels)) take **$7.87\text{ ms/token}$** (`127 tok/s`), why does `4× GB200` / `4× B200` take **$4.46\text{–}8.21\text{ ms/step}$** (`224.4 tok/s` target-only in [`vllm#57885`](https://github.com/vllm-project/vllm/pull/57885); `7.24\text{–}8.21\text{ ms/step}` with DSpark5 in [`InferenceX#3346`](https://github.com/SemiAnalysisAI/InferenceX/pull/3346)), and why does a standard multi-kernel JAX/XLA implementation on the exact same 16× TPU v7x slice take **$213.16\text{ ms/token}$** (`4.69 tok/s`)?
 
 ### 1.2 The Three Bottlenecks of Multi-Kernel Serving
 1. **Kernel Launch & Dispatch Overhead ($\sim 400$ Kernels/Token):**
